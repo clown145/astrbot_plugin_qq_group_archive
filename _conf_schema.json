@@ -1,0 +1,61 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "Enable archive collection",
+    "default": true,
+    "hint": "Disable this to stop writing new QQ group events into the plugin database."
+  },
+  "group_list_mode": {
+    "type": "string",
+    "description": "Group list mode",
+    "options": ["whitelist", "blacklist"],
+    "default": "whitelist",
+    "hint": "whitelist: only archive listed groups. blacklist: archive every QQ group except the listed ones."
+  },
+  "group_list": {
+    "type": "list",
+    "description": "Target QQ groups",
+    "default": [],
+    "hint": "Each item can be a plain group id like 123456, a full unified session id like onebot:GroupMessage:123456, or platform_id:group_id.",
+    "items": {
+      "type": "string"
+    }
+  },
+  "save_raw_event": {
+    "type": "bool",
+    "description": "Persist raw OneBot event payload",
+    "default": true,
+    "hint": "Recommended. This keeps unsupported QQ segment types such as mface recoverable from the raw payload."
+  },
+  "save_media_files": {
+    "type": "bool",
+    "description": "Persist media files locally",
+    "default": true,
+    "hint": "When enabled, images, voice, video, and files are copied into the plugin media directory."
+  },
+  "max_media_size_mb": {
+    "type": "int",
+    "description": "Per-file media size limit in MB",
+    "default": 30,
+    "hint": "Files larger than this limit are recorded as metadata only and will not be copied into plugin storage."
+  },
+  "expand_forward_messages": {
+    "type": "bool",
+    "description": "Resolve forward message nodes with get_forward_msg",
+    "default": true,
+    "hint": "The outer forward segment is always archived. This option additionally fetches and stores the forwarded node contents when the OneBot implementation supports it."
+  },
+  "record_all_notice_events": {
+    "type": "bool",
+    "description": "Record all QQ group notice events",
+    "default": true,
+    "hint": "If disabled, the plugin still records recalls and message emoji reactions because they are core archive events."
+  },
+  "capture_outgoing_messages": {
+    "type": "bool",
+    "description": "Archive bot messages after they are sent",
+    "default": true,
+    "hint": "Outgoing messages are archived without a platform message id because AstrBot does not expose it at this hook point."
+  }
+}
+
