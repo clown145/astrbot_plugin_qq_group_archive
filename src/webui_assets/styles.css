@@ -49,6 +49,9 @@ button {
 .shell {
   width: min(1680px, calc(100vw - 32px));
   margin: 20px auto 32px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .hero {
@@ -139,12 +142,15 @@ button {
   gap: 14px;
   margin-top: 16px;
   min-height: 70vh;
+  flex: 1 1 auto;
 }
 
 .panel {
   padding: 18px;
   border-radius: var(--radius);
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .groups-panel,
@@ -152,6 +158,28 @@ button {
 .detail-panel {
   display: flex;
   flex-direction: column;
+}
+
+.groups-panel .scroll-area,
+.timeline-panel .scroll-area,
+.detail-panel .scroll-area {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.timeline-panel .tabs,
+.timeline-panel .toolbar,
+.detail-panel .panel-head,
+.groups-panel .panel-head,
+.groups-panel .toolbar {
+  flex-shrink: 0;
+}
+
+.panel-head-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
 .panel-head,
@@ -232,6 +260,10 @@ button {
 
 .ghost-button {
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.panel-switch-button {
+  flex: 0 0 auto;
 }
 
 .wide-button {
@@ -412,6 +444,10 @@ pre {
   margin-top: 16px;
 }
 
+.mobile-only {
+  display: none;
+}
+
 .hidden {
   display: none !important;
 }
@@ -435,6 +471,33 @@ pre {
   border-radius: 20px;
 }
 
+@media (min-width: 861px) {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    overflow: hidden;
+  }
+
+  .shell {
+    height: calc(100vh - 52px);
+    max-height: calc(100vh - 52px);
+  }
+
+  .hero,
+  .stats-grid {
+    flex: 0 0 auto;
+  }
+
+  .workspace {
+    min-height: 0;
+    height: auto;
+    max-height: none;
+  }
+}
+
 @media (max-width: 1260px) {
   .stats-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -450,9 +513,16 @@ pre {
 }
 
 @media (max-width: 860px) {
+  body {
+    overflow: auto;
+  }
+
   .shell {
     width: min(100vw - 18px, 1680px);
     margin: 10px auto 20px;
+    display: block;
+    height: auto;
+    max-height: none;
   }
 
   .hero,
@@ -470,7 +540,53 @@ pre {
 
   .workspace {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    gap: 12px;
+    height: auto;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+
+  .workspace::-webkit-scrollbar {
+    display: none;
+  }
+
+  .workspace {
+    scrollbar-width: none;
+  }
+
+  .mobile-only {
+    display: inline-flex;
+  }
+
+  .workspace > .panel {
+    flex: 0 0 100%;
+    width: 100%;
+    height: 78svh;
+    min-height: 78svh;
+    overflow: hidden;
+    scroll-snap-align: start;
+  }
+
+  .groups-panel,
+  .timeline-panel,
+  .detail-panel {
+    min-height: 78svh;
+  }
+
+  .panel-head {
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .panel-head-main {
+    flex: 1 1 auto;
   }
 
   .kv-grid {

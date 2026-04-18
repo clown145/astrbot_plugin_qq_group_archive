@@ -49,8 +49,8 @@
         </article>
       </section>
 
-      <main class="workspace">
-        <section class="panel groups-panel">
+      <main id="workspace" class="workspace">
+        <section id="groups-panel" class="panel groups-panel">
           <div class="panel-head">
             <div>
               <p class="panel-title">群聊</p>
@@ -64,11 +64,16 @@
           <div id="group-list" class="list scroll-area"></div>
         </section>
 
-        <section class="panel timeline-panel">
+        <section id="timeline-panel" class="panel timeline-panel">
           <div class="panel-head">
-            <div>
-              <p class="panel-title">时间线</p>
-              <p class="panel-caption" id="timeline-caption">先选择一个群</p>
+            <div class="panel-head-main">
+              <button id="mobile-show-groups" class="ghost-button panel-switch-button mobile-only">
+                群聊
+              </button>
+              <div>
+                <p class="panel-title">时间线</p>
+                <p class="panel-caption" id="timeline-caption">先选择一个群</p>
+              </div>
             </div>
             <button id="refresh-active" class="ghost-button">刷新</button>
           </div>
@@ -117,11 +122,19 @@
           </div>
         </section>
 
-        <section class="panel detail-panel">
+        <section id="detail-panel" class="panel detail-panel">
           <div class="panel-head">
-            <div>
-              <p class="panel-title">详情</p>
-              <p class="panel-caption" id="detail-caption">点击一条消息或通知查看详情</p>
+            <div class="panel-head-main">
+              <button
+                id="mobile-back-to-timeline"
+                class="ghost-button panel-switch-button mobile-only"
+              >
+                返回
+              </button>
+              <div>
+                <p class="panel-title">详情</p>
+                <p class="panel-caption" id="detail-caption">点击一条消息或通知查看详情</p>
+              </div>
             </div>
           </div>
           <div id="detail-view" class="detail-view scroll-area">

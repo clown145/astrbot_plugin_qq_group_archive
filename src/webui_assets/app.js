@@ -4,6 +4,7 @@ const state = {
   selectedGroup: null,
   selectedRecord: null,
   activeTab: "messages",
+  mobilePane: "groups",
   messageOffset: 0,
   messageLimit: 50,
   noticeOffset: 0,
@@ -13,6 +14,10 @@ const state = {
 };
 
 const el = {
+  workspace: document.getElementById("workspace"),
+  groupsPanel: document.getElementById("groups-panel"),
+  timelinePanel: document.getElementById("timeline-panel"),
+  detailPanel: document.getElementById("detail-panel"),
   stats: {
     groups: document.getElementById("stat-groups"),
     incoming: document.getElementById("stat-incoming"),
@@ -33,6 +38,8 @@ const el = {
   messageSearch: document.getElementById("message-search"),
   noticeType: document.getElementById("notice-type"),
   profileSearch: document.getElementById("profile-search"),
+  mobileShowGroups: document.getElementById("mobile-show-groups"),
+  mobileBackToTimeline: document.getElementById("mobile-back-to-timeline"),
   messageList: document.getElementById("message-list"),
   noticeList: document.getElementById("notice-list"),
   profileGroupSummary: document.getElementById("profile-group-summary"),
@@ -140,6 +147,77 @@ function mediaUrl(relativePath) {
   return `/api/media/${encoded}${tokenQuery}`;
 }
 
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 860px)").matches;
+}
+
+function getMobilePaneElement(pane) {
+  if (pane === "detail") {
+    return el.detailPanel;
+  }
+  if (pane === "timeline") {
+    return el.timelinePanel;
+  }
+  return el.groupsPanel;
+}
+
+function normalizeMobilePane() {
+  if (!state.selectedGroup) {
+    return "groups";
+  }
+  if (!["groups", "timeline", "detail"].includes(state.mobilePane)) {
+    return "timeline";
+  }
+  return state.mobilePane;
+}
+
+function applyMobilePane(behavior = "auto") {
+  state.mobilePane = normalizeMobilePane();
+  if (!isMobileLayout()) {
+    return;
+  }
+
+  const target = getMobilePaneElement(state.mobilePane);
+  if (!target) {
+    return;
+  }
+
+  el.workspace.scrollTo({
+    left: target.offsetLeft,
+    behavior,
+  });
+}
+
+function setMobilePane(pane, behavior = "smooth") {
+  state.mobilePane = pane;
+  applyMobilePane(behavior);
+}
+
+function syncMobilePaneFromScroll() {
+  if (!isMobileLayout()) {
+    return;
+  }
+
+  const candidates = [
+    { key: "groups", element: el.groupsPanel },
+    { key: "timeline", element: el.timelinePanel },
+    { key: "detail", element: el.detailPanel },
+  ];
+  const currentLeft = el.workspace.scrollLeft;
+  let closest = candidates[0];
+  let minDistance = Number.POSITIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const distance = Math.abs(candidate.element.offsetLeft - currentLeft);
+    if (distance < minDistance) {
+      minDistance = distance;
+      closest = candidate;
+    }
+  }
+
+  state.mobilePane = closest.key;
+}
+
 async function loadOverview() {
   const overview = await api("/api/overview");
   el.stats.groups.textContent = formatCount(overview.total_groups);
@@ -208,6 +286,11 @@ async function selectGroup(group) {
   state.messageOffset = 0;
   state.noticeOffset = 0;
   state.profileOffset = 0;
+  if (group) {
+    setMobilePane("timeline", "smooth");
+  } else {
+    setMobilePane("groups", "smooth");
+  }
   el.timelineCaption.textContent = currentGroupLabel(group);
   el.detailCaption.textContent = "点击一条消息、通知或成员画像查看详情";
   renderGroups();
@@ -290,6 +373,9 @@ function bindMessageItemClicks() {
       const detail = await api(`/api/messages/${node.dataset.messageId}`);
       state.selectedRecord = { kind: "message", id: node.dataset.messageId, detail };
       renderMessageDetail(detail);
+      if (isMobileLayout()) {
+        setMobilePane("detail", "smooth");
+      }
     });
   }
 }
@@ -355,6 +441,9 @@ function bindNoticeItemClicks() {
       const detail = await api(`/api/notices/${node.dataset.noticeId}`);
       state.selectedRecord = { kind: "notice", id: node.dataset.noticeId, detail };
       renderNoticeDetail(detail);
+      if (isMobileLayout()) {
+        setMobilePane("detail", "smooth");
+      }
     });
   }
 }
@@ -496,6 +585,9 @@ function bindProfileUserClicks() {
       );
       state.selectedRecord = { kind: "profile", id: node.dataset.userId, detail };
       renderProfileDetail(detail);
+      if (isMobileLayout()) {
+        setMobilePane("detail", "smooth");
+      }
     });
   }
 }
@@ -797,6 +889,8 @@ function bindEvents() {
   el.loadMoreMessages.addEventListener("click", () => void loadMessages(false).catch(reportError));
   el.loadMoreNotices.addEventListener("click", () => void loadNotices(false).catch(reportError));
   el.loadMoreProfiles.addEventListener("click", () => void loadProfiles(false).catch(reportError));
+  el.mobileShowGroups.addEventListener("click", () => setMobilePane("groups", "smooth"));
+  el.mobileBackToTimeline.addEventListener("click", () => setMobilePane("timeline", "smooth"));
   el.authButton.addEventListener("click", showAuthDialog);
 
   el.saveAuthToken.addEventListener("click", async (event) => {
@@ -813,6 +907,9 @@ function bindEvents() {
   for (const node of el.tabs) {
     node.addEventListener("click", () => switchTab(node.dataset.tab));
   }
+
+  el.workspace.addEventListener("scroll", syncMobilePaneFromScroll, { passive: true });
+  window.addEventListener("resize", () => applyMobilePane("auto"));
 }
 
 function reportError(error) {
@@ -830,14 +927,17 @@ async function bootstrap() {
   await Promise.all([loadOverview(), loadGroups()]);
   if (state.selectedGroup) {
     await Promise.all([loadMessages(true), loadNotices(true), loadProfiles(true)]);
+    setMobilePane("timeline", "auto");
   } else {
     renderEmpty(el.messageList, "先选择一个群聊。");
     renderEmpty(el.noticeList, "先选择一个群聊。");
     renderEmpty(el.profileGroupSummary, "先选择一个群聊。");
     renderEmpty(el.profileUserList, "先选择一个群聊。");
+    setMobilePane("groups", "auto");
   }
 }
 
 bindEvents();
 switchTab("messages");
+applyMobilePane("auto");
 bootstrap().catch(reportError);
