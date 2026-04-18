@@ -19,7 +19,14 @@ from astrbot.api.message_components import (
     Video,
 )
 
-from .models import ArchivedNoticeEvent, ArchivedSegment, ForwardNodeRecord
+from .models import (
+    ArchivedMessage,
+    ArchivedNoticeEvent,
+    ArchivedSegment,
+    ForwardNodeRecord,
+    InteractionRecord,
+    ProfileStats,
+)
 
 HANDLED_RAW_SEGMENTS = {
     "at",
@@ -42,7 +49,6 @@ HANDLED_RAW_SEGMENTS = {
     "text",
     "video",
 }
-
 
 def json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -261,6 +267,111 @@ def parse_forward_nodes(
     return nodes
 
 
+def build_profile_stats_for_message(message: ArchivedMessage) -> ProfileStats:
+    stats = ProfileStats()
+    if message.direction == "outgoing":
+        stats.outgoing_message_count = 1
+    else:
+        stats.incoming_message_count = 1
+
+    text_chars = 0
+    media_seen = False
+    for segment in message.segments:
+        if segment.segment_type == "text":
+            text_chars += len(segment.text or "")
+        elif segment.segment_type == "image":
+            stats.image_count += 1
+            media_seen = True
+        elif segment.segment_type == "record":
+            stats.record_count += 1
+            media_seen = True
+        elif segment.segment_type == "video":
+            stats.video_count += 1
+            media_seen = True
+        elif segment.segment_type == "file":
+            stats.file_count += 1
+            media_seen = True
+        elif segment.segment_type == "forward":
+            stats.forward_count += 1
+        elif segment.segment_type == "reply":
+            stats.reply_count += 1
+        elif segment.segment_type == "at":
+            stats.at_count += 1
+        elif segment.segment_type.startswith("raw_"):
+            stats.raw_segment_count += 1
+
+    stats.total_text_chars = text_chars
+    stats.text_message_count = 1 if text_chars > 0 else 0
+    stats.media_message_count = 1 if media_seen else 0
+    return stats
+
+
+def build_profile_stats_for_notice(notice: ArchivedNoticeEvent) -> ProfileStats:
+    stats = ProfileStats()
+    if notice.notice_type == "group_recall":
+        stats.recall_action_count = 1
+    elif notice.notice_type == "group_msg_emoji_like":
+        stats.emoji_notice_count = 1
+    return stats
+
+
+def build_interactions_for_message(message: ArchivedMessage) -> list[InteractionRecord]:
+    source_user_id = _optional_text(message.sender_id)
+    if source_user_id is None:
+        return []
+
+    interactions: list[InteractionRecord] = []
+    for segment in message.segments:
+        if segment.segment_type == "at":
+            target_user_id = _optional_text(segment.data.get("qq"))
+            if target_user_id and target_user_id != source_user_id:
+                interactions.append(
+                    InteractionRecord(
+                        platform_id=message.platform_id,
+                        group_id=message.group_id,
+                        source_user_id=source_user_id,
+                        target_user_id=target_user_id,
+                        interaction_type="at",
+                        event_time=message.event_time,
+                    )
+                )
+        elif segment.segment_type == "reply":
+            target_user_id = _optional_text(segment.data.get("sender_id"))
+            if target_user_id and target_user_id != source_user_id:
+                interactions.append(
+                    InteractionRecord(
+                        platform_id=message.platform_id,
+                        group_id=message.group_id,
+                        source_user_id=source_user_id,
+                        target_user_id=target_user_id,
+                        interaction_type="reply",
+                        event_time=message.event_time,
+                    )
+                )
+    return interactions
+
+
+def build_interactions_for_notice(notice: ArchivedNoticeEvent) -> list[InteractionRecord]:
+    if notice.notice_type != "group_msg_emoji_like":
+        return []
+
+    source_user_id = _optional_text(notice.operator_id)
+    target_user_id = _optional_text(notice.target_id or notice.actor_user_id)
+    if not source_user_id or not target_user_id or source_user_id == target_user_id:
+        return []
+
+    return [
+        InteractionRecord(
+            platform_id=notice.platform_id,
+            group_id=notice.group_id,
+            source_user_id=source_user_id,
+            target_user_id=target_user_id,
+            interaction_type="emoji_reaction",
+            event_time=notice.event_time,
+        )
+    ]
+
+
 def _normalize_component(index: int, component: Any) -> ArchivedSegment:
     if isinstance(component, Plain):
         return ArchivedSegment(
@@ -432,4 +543,3 @@ def _optional_int(value: Any) -> int | None:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
-

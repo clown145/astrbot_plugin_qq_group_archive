@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.message_components import Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -19,13 +18,18 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 from .config import PluginSettings
 from .models import ArchivedMessage, ArchivedSegment
 from .normalizer import (
+    build_interactions_for_message,
+    build_interactions_for_notice,
     build_notice_record,
     build_outline,
     build_plain_text,
+    build_profile_stats_for_message,
+    build_profile_stats_for_notice,
     normalize_message_segments,
     parse_forward_nodes,
     serialize_raw_event,
 )
+from .models import ProfileStats
 from .storage import ArchiveDatabase
 
 
@@ -130,7 +134,21 @@ class QQGroupArchiveService:
             raw_event=None,
             segments=segments,
         )
-        await self.db.insert_message(message)
+        _, created = await self.db.insert_message(message)
+        if not created:
+            return
+
+        await self.db.apply_user_profile_stats(
+            platform_id=message.platform_id,
+            group_id=message.group_id,
+            group_name=message.group_name,
+            user_id=message.sender_id,
+            sender_name=message.sender_name,
+            sender_card=message.sender_card,
+            event_time=message.event_time,
+            stats=build_profile_stats_for_message(message),
+            interactions=build_interactions_for_message(message),
+        )
 
     async def get_group_status_text(self, event: AstrMessageEvent) -> str:
         await self.initialize()
@@ -150,6 +168,8 @@ class QQGroupArchiveService:
                 f"matched: {matched}",
                 f"db: {self.db.db_path}",
                 f"media_dir: {self.media_dir}",
+                f"webui_enabled: {settings.webui_enabled}",
+                f"webui_url: http://{settings.webui_host}:{settings.webui_port}",
             ]
         )
 
@@ -225,6 +245,18 @@ class QQGroupArchiveService:
         if not created:
             return
 
+        await self.db.apply_user_profile_stats(
+            platform_id=message.platform_id,
+            group_id=message.group_id,
+            group_name=message.group_name,
+            user_id=message.sender_id,
+            sender_name=message.sender_name,
+            sender_card=message.sender_card,
+            event_time=message.event_time,
+            stats=build_profile_stats_for_message(message),
+            interactions=build_interactions_for_message(message),
+        )
+
         if not settings.expand_forward_messages:
             return
 
@@ -279,14 +311,43 @@ class QQGroupArchiveService:
         if not created:
             return
 
+        await self.db.apply_user_profile_stats(
+            platform_id=notice.platform_id,
+            group_id=notice.group_id,
+            group_name=notice.group_name,
+            user_id=notice.operator_id or notice.actor_user_id,
+            sender_name=None,
+            sender_card=None,
+            event_time=notice.event_time,
+            stats=build_profile_stats_for_notice(notice),
+            interactions=build_interactions_for_notice(notice),
+        )
+
         if notice.notice_type == "group_recall" and notice.message_id:
-            await self.db.mark_message_recalled(
+            recalled_message = await self.db.mark_message_recalled(
                 platform_id=notice.platform_id,
                 group_id=notice.group_id,
                 message_id=notice.message_id,
                 operator_id=notice.operator_id,
                 recalled_at=notice.event_time,
             )
+            if (
+                recalled_message is not None
+                and not bool(recalled_message.get("already_recalled"))
+                and str(recalled_message.get("sender_id") or "").strip()
+            ):
+                await self.db.apply_user_profile_stats(
+                    platform_id=notice.platform_id,
+                    group_id=notice.group_id,
+                    group_name=str(
+                        recalled_message.get("group_name") or notice.group_name or ""
+                    ),
+                    user_id=str(recalled_message.get("sender_id") or ""),
+                    sender_name=str(recalled_message.get("sender_name") or ""),
+                    sender_card=str(recalled_message.get("sender_card") or ""),
+                    event_time=notice.event_time,
+                    stats=ProfileStats(recalled_message_count=1),
+                )
 
     async def _persist_media_segments(
         self,
@@ -378,4 +439,3 @@ class QQGroupArchiveService:
     def _optional_text(value: Any) -> str | None:
         text = str(value or "").strip()
         return text or None
-

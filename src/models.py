@@ -75,3 +75,53 @@ class ForwardNodeRecord:
     content_text: str
     content_json: dict[str, Any]
 
+
+@dataclass(slots=True)
+class ProfileStats:
+    incoming_message_count: int = 0
+    outgoing_message_count: int = 0
+    text_message_count: int = 0
+    total_text_chars: int = 0
+    image_count: int = 0
+    record_count: int = 0
+    video_count: int = 0
+    file_count: int = 0
+    forward_count: int = 0
+    reply_count: int = 0
+    at_count: int = 0
+    raw_segment_count: int = 0
+    media_message_count: int = 0
+    recall_action_count: int = 0
+    recalled_message_count: int = 0
+    emoji_notice_count: int = 0
+
+    def to_mapping(self) -> dict[str, int]:
+        return {
+            "incoming_message_count": self.incoming_message_count,
+            "outgoing_message_count": self.outgoing_message_count,
+            "text_message_count": self.text_message_count,
+            "total_text_chars": self.total_text_chars,
+            "image_count": self.image_count,
+            "record_count": self.record_count,
+            "video_count": self.video_count,
+            "file_count": self.file_count,
+            "forward_count": self.forward_count,
+            "reply_count": self.reply_count,
+            "at_count": self.at_count,
+            "raw_segment_count": self.raw_segment_count,
+            "media_message_count": self.media_message_count,
+            "recall_action_count": self.recall_action_count,
+            "recalled_message_count": self.recalled_message_count,
+            "emoji_notice_count": self.emoji_notice_count,
+        }
+
+
+@dataclass(slots=True)
+class InteractionRecord:
+    platform_id: str
+    group_id: str
+    source_user_id: str
+    target_user_id: str
+    interaction_type: str
+    event_time: int
+    count: int = 1

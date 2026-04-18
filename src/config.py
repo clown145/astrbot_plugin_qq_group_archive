@@ -15,6 +15,10 @@ class PluginSettings:
     expand_forward_messages: bool = True
     record_all_notice_events: bool = True
     capture_outgoing_messages: bool = True
+    webui_enabled: bool = True
+    webui_host: str = "127.0.0.1"
+    webui_port: int = 18766
+    webui_auth_token: str = ""
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> "PluginSettings":
@@ -37,6 +41,11 @@ class PluginSettings:
             capture_outgoing_messages=bool(
                 values.get("capture_outgoing_messages", True)
             ),
+            webui_enabled=bool(values.get("webui_enabled", True)),
+            webui_host=str(values.get("webui_host", "127.0.0.1")).strip()
+            or "127.0.0.1",
+            webui_port=max(int(values.get("webui_port", 18766) or 18766), 1),
+            webui_auth_token=str(values.get("webui_auth_token", "")).strip(),
         )
 
     @property
@@ -71,4 +80,3 @@ class PluginSettings:
     @staticmethod
     def _normalize(value: str) -> str:
         return str(value or "").strip().lower()
-

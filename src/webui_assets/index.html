@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QQ Group Archive</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">AstrBot Plugin</p>
+          <h1>QQ Group Archive</h1>
+          <p class="subline">
+            查看群消息、撤回事件、点表情回应、转发节点、成员画像和原始 OneBot payload。
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="refresh-overview" class="ghost-button">刷新概览</button>
+          <button id="auth-button" class="ghost-button">设置令牌</button>
+        </div>
+      </header>
+
+      <section class="stats-grid" id="stats-grid">
+        <article class="stat-card">
+          <span class="stat-label">群聊</span>
+          <strong id="stat-groups">-</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">入站消息</span>
+          <strong id="stat-incoming">-</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">出站消息</span>
+          <strong id="stat-outgoing">-</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">撤回消息</span>
+          <strong id="stat-recalled">-</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">通知事件</span>
+          <strong id="stat-notices">-</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">转发节点</span>
+          <strong id="stat-forwards">-</strong>
+        </article>
+      </section>
+
+      <main class="workspace">
+        <section class="panel groups-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-title">群聊</p>
+              <p class="panel-caption" id="group-total-caption">0 个结果</p>
+            </div>
+            <button id="refresh-groups" class="ghost-button">刷新</button>
+          </div>
+          <div class="toolbar">
+            <input id="group-search" type="search" placeholder="搜索群号、平台、群名" />
+          </div>
+          <div id="group-list" class="list scroll-area"></div>
+        </section>
+
+        <section class="panel timeline-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-title">时间线</p>
+              <p class="panel-caption" id="timeline-caption">先选择一个群</p>
+            </div>
+            <button id="refresh-active" class="ghost-button">刷新</button>
+          </div>
+
+          <div class="tabs">
+            <button class="tab is-active" data-tab="messages">消息</button>
+            <button class="tab" data-tab="notices">通知</button>
+            <button class="tab" data-tab="profiles">画像</button>
+          </div>
+
+          <div id="messages-toolbar" class="toolbar">
+            <select id="message-direction">
+              <option value="">全部方向</option>
+              <option value="incoming">入站</option>
+              <option value="outgoing">出站</option>
+            </select>
+            <input id="message-search" type="search" placeholder="搜索文本、昵称、摘要" />
+          </div>
+
+          <div id="notices-toolbar" class="toolbar hidden">
+            <select id="notice-type">
+              <option value="">全部通知</option>
+              <option value="group_recall">撤回</option>
+              <option value="group_msg_emoji_like">点表情回应</option>
+            </select>
+          </div>
+
+          <div id="profiles-toolbar" class="toolbar hidden">
+            <input id="profile-search" type="search" placeholder="搜索成员 QQ、昵称、群名片" />
+          </div>
+
+          <div id="messages-view" class="scroll-area">
+            <div id="message-list" class="list"></div>
+            <button id="load-more-messages" class="wide-button hidden">加载更多消息</button>
+          </div>
+
+          <div id="notices-view" class="scroll-area hidden">
+            <div id="notice-list" class="list"></div>
+            <button id="load-more-notices" class="wide-button hidden">加载更多通知</button>
+          </div>
+
+          <div id="profiles-view" class="scroll-area hidden">
+            <div id="profile-group-summary" class="detail-view"></div>
+            <div id="profile-user-list" class="list"></div>
+            <button id="load-more-profiles" class="wide-button hidden">加载更多成员</button>
+          </div>
+        </section>
+
+        <section class="panel detail-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-title">详情</p>
+              <p class="panel-caption" id="detail-caption">点击一条消息或通知查看详情</p>
+            </div>
+          </div>
+          <div id="detail-view" class="detail-view scroll-area">
+            <div class="empty-state">
+              <p>当前没有选中的记录。</p>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="auth-dialog" class="auth-dialog">
+      <form method="dialog" class="auth-card">
+        <p class="panel-title">访问令牌</p>
+        <p class="auth-copy">
+          如果你给 WebUI 配了 `webui_auth_token`，在这里填入同一个值。
+        </p>
+        <input id="auth-token-input" type="password" placeholder="X-Auth-Token" />
+        <div class="auth-actions">
+          <button value="cancel" class="ghost-button">关闭</button>
+          <button id="save-auth-token" value="default" class="primary-button">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

@@ -56,6 +56,29 @@
     "description": "Archive bot messages after they are sent",
     "default": true,
     "hint": "Outgoing messages are archived without a platform message id because AstrBot does not expose it at this hook point."
+  },
+  "webui_enabled": {
+    "type": "bool",
+    "description": "Enable archive WebUI",
+    "default": true,
+    "hint": "Starts a small local HTTP server for browsing archived groups, messages, notices, and raw payloads."
+  },
+  "webui_host": {
+    "type": "string",
+    "description": "WebUI bind host",
+    "default": "127.0.0.1",
+    "hint": "Use 127.0.0.1 for local-only access. Use 0.0.0.0 only when you really need remote access."
+  },
+  "webui_port": {
+    "type": "int",
+    "description": "WebUI bind port",
+    "default": 18766,
+    "hint": "Port used by the archive WebUI."
+  },
+  "webui_auth_token": {
+    "type": "string",
+    "description": "WebUI auth token",
+    "default": "",
+    "hint": "Optional bearer-like token for the WebUI API. When empty, the WebUI is open to whoever can reach the port."
   }
 }
-

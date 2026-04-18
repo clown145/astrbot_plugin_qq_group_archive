@@ -1,4 +1,8 @@
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import PluginSettings
 
@@ -56,6 +60,20 @@ class PluginSettingsTest(unittest.TestCase):
                 session_id="123456",
             )
         )
+
+    def test_from_mapping_parses_webui_settings(self):
+        settings = PluginSettings.from_mapping(
+            {
+                "webui_enabled": True,
+                "webui_host": "0.0.0.0",
+                "webui_port": 19999,
+                "webui_auth_token": "secret-token",
+            }
+        )
+        self.assertTrue(settings.webui_enabled)
+        self.assertEqual(settings.webui_host, "0.0.0.0")
+        self.assertEqual(settings.webui_port, 19999)
+        self.assertEqual(settings.webui_auth_token, "secret-token")
 
 
 if __name__ == "__main__":
