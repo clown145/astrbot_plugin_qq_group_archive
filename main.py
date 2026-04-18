@@ -6,6 +6,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 
 from .src.config import PluginSettings
+from .src.profile_pipeline import ProfilePipelineService
 from .src.service import QQGroupArchiveService
 from .src.storage import ArchiveDatabase
 from .src.webui import ArchiveWebUIServer
@@ -23,6 +24,11 @@ class QQGroupArchivePlugin(Star):
             db=self.db,
             config=config,
         )
+        self.profile_pipeline = ProfilePipelineService(
+            db=self.db,
+            config=config,
+        )
+        self.service.profile_pipeline = self.profile_pipeline
         self.webui: ArchiveWebUIServer | None = None
 
     async def initialize(self):
@@ -60,6 +66,7 @@ class QQGroupArchivePlugin(Star):
         )
 
     async def terminate(self):
+        await self.profile_pipeline.stop()
         if self.webui is not None:
             await self.webui.stop()
         await self.db.close()
@@ -67,6 +74,7 @@ class QQGroupArchivePlugin(Star):
 
     async def _bootstrap(self):
         await self.service.initialize()
+        await self.profile_pipeline.start()
         await self._ensure_webui()
 
     async def _ensure_webui(self):

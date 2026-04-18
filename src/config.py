@@ -19,6 +19,13 @@ class PluginSettings:
     webui_host: str = "127.0.0.1"
     webui_port: int = 18766
     webui_auth_token: str = ""
+    profile_pipeline_enabled: bool = False
+    profile_pipeline_mode: str = "heuristic"
+    profile_pipeline_poll_interval_sec: int = 30
+    profile_pipeline_batch_message_limit: int = 40
+    profile_pipeline_min_batch_messages: int = 12
+    profile_pipeline_batch_overlap: int = 8
+    profile_pipeline_max_jobs_per_tick: int = 2
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> "PluginSettings":
@@ -46,6 +53,28 @@ class PluginSettings:
             or "127.0.0.1",
             webui_port=max(int(values.get("webui_port", 18766) or 18766), 1),
             webui_auth_token=str(values.get("webui_auth_token", "")).strip(),
+            profile_pipeline_enabled=bool(
+                values.get("profile_pipeline_enabled", False)
+            ),
+            profile_pipeline_mode=str(
+                values.get("profile_pipeline_mode", "heuristic")
+            ).strip().lower()
+            or "heuristic",
+            profile_pipeline_poll_interval_sec=max(
+                int(values.get("profile_pipeline_poll_interval_sec", 30) or 30), 5
+            ),
+            profile_pipeline_batch_message_limit=max(
+                int(values.get("profile_pipeline_batch_message_limit", 40) or 40), 8
+            ),
+            profile_pipeline_min_batch_messages=max(
+                int(values.get("profile_pipeline_min_batch_messages", 12) or 12), 4
+            ),
+            profile_pipeline_batch_overlap=max(
+                int(values.get("profile_pipeline_batch_overlap", 8) or 8), 0
+            ),
+            profile_pipeline_max_jobs_per_tick=max(
+                int(values.get("profile_pipeline_max_jobs_per_tick", 2) or 2), 1
+            ),
         )
 
     @property

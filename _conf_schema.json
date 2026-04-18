@@ -80,5 +80,48 @@
     "description": "WebUI auth token",
     "default": "",
     "hint": "Optional bearer-like token for the WebUI API. When empty, the WebUI is open to whoever can reach the port."
+  },
+  "profile_pipeline_enabled": {
+    "type": "bool",
+    "description": "Enable LangGraph profile pipeline",
+    "default": false,
+    "hint": "Builds message batches from archived group chats, runs a fixed judge/extract/resolve workflow, and writes claim/attribute tables back into archive.db."
+  },
+  "profile_pipeline_mode": {
+    "type": "string",
+    "description": "Profile pipeline model mode",
+    "options": ["heuristic", "noop"],
+    "default": "heuristic",
+    "hint": "heuristic uses built-in keyword and regex extraction to validate the LangGraph workflow. noop keeps the pipeline structure but does not emit claims."
+  },
+  "profile_pipeline_poll_interval_sec": {
+    "type": "int",
+    "description": "Profile pipeline poll interval in seconds",
+    "default": 30,
+    "hint": "How often the background runner checks for new message batches and pending extraction jobs."
+  },
+  "profile_pipeline_batch_message_limit": {
+    "type": "int",
+    "description": "Messages per profile batch",
+    "default": 40,
+    "hint": "Upper bound of incoming group messages bundled into one LangGraph block before judge/extract runs."
+  },
+  "profile_pipeline_min_batch_messages": {
+    "type": "int",
+    "description": "Minimum messages required to create a batch",
+    "default": 12,
+    "hint": "If a group has fewer than this many unseen incoming messages, the pipeline waits for more before creating a block."
+  },
+  "profile_pipeline_batch_overlap": {
+    "type": "int",
+    "description": "Batch overlap message count",
+    "default": 8,
+    "hint": "Messages repeated between neighboring blocks so the judge can still see context that spans across long conversations."
+  },
+  "profile_pipeline_max_jobs_per_tick": {
+    "type": "int",
+    "description": "Maximum profile jobs per poll cycle",
+    "default": 2,
+    "hint": "Controls how many LangGraph jobs the background runner executes in one polling round."
   }
 }

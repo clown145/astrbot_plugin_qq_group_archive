@@ -92,6 +92,16 @@ WebUI-specific fields:
 - `webui_port`: bind port, default `18766`
 - `webui_auth_token`: optional token checked by the WebUI API
 
+Profile-pipeline fields:
+
+- `profile_pipeline_enabled`: enable the LangGraph-based portrait pipeline
+- `profile_pipeline_mode`: `heuristic` or `noop`
+- `profile_pipeline_poll_interval_sec`: background poll interval
+- `profile_pipeline_batch_message_limit`: max incoming messages per batch
+- `profile_pipeline_min_batch_messages`: minimum unseen messages before a batch is created
+- `profile_pipeline_batch_overlap`: repeated context between neighboring batches
+- `profile_pipeline_max_jobs_per_tick`: max profile jobs handled in one poll round
+
 ## Commands
 
 - `/归档状态`
@@ -140,11 +150,39 @@ Profile tables:
 - `profile_interactions`
   Aggregated interaction edges such as `at`, `reply`, and best-effort
   `emoji_reaction`.
+- `profile_message_blocks`
+  Incoming-message batches consumed by the LangGraph workflow.
+- `profile_extraction_jobs`
+  Workflow jobs and execution state for each block.
+- `profile_claims`
+  Extracted portrait facts with confidence, source type, status, and raw payload.
+- `profile_claim_evidence`
+  Claim-to-message evidence links so WebUI or later tooling can jump back to raw messages.
+- `profile_attributes`
+  Current attribute view per `(platform_id, group_id, subject_user_id, attribute_type)`.
+- `profile_attribute_history`
+  Audit trail for current-attribute replacements.
 
 The profile layer is derived from the archive layer, not a replacement for it:
 
 - `archived_*` keeps raw facts and original payloads
 - `profile_*` keeps fast aggregated counters for portrait / persona analysis
+
+## LangGraph Profile Pipeline
+
+When `profile_pipeline_enabled` is on, the plugin runs a fixed workflow:
+
+1. Build overlapping incoming-message batches per group
+2. Judge whether a batch contains portrait-relevant clues
+3. Extract structured claims from candidate spans
+4. Resolve duplicates / conflicts against current attributes
+5. Persist claim, evidence, and attribute updates back into `archive.db`
+
+Current `heuristic` mode is a bootstrap implementation used to validate the
+workflow and schema without depending on an external LLM provider. The workflow
+is already isolated behind `ProfilePipelineLLM`, so a real LLM-backed judge /
+extractor / resolver can replace it later without changing the storage or
+LangGraph orchestration layer.
 
 Typical `archived_messages` row:
 

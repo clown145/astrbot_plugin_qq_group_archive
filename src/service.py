@@ -38,6 +38,7 @@ class QQGroupArchiveService:
         self.data_dir = data_dir
         self.db = db
         self.config = config
+        self.profile_pipeline: Any = None
         self.media_dir = self.data_dir / "media"
         self._init_lock = asyncio.Lock()
         self._initialized = False
@@ -256,6 +257,8 @@ class QQGroupArchiveService:
             stats=build_profile_stats_for_message(message),
             interactions=build_interactions_for_message(message),
         )
+        if self.profile_pipeline is not None:
+            await self.profile_pipeline.wake()
 
         if not settings.expand_forward_messages:
             return

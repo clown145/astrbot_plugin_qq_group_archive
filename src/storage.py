@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 import time
 from pathlib import Path
@@ -1200,6 +1201,674 @@ class ArchiveDatabase:
             "incoming_interactions": [dict(row) for row in incoming_rows],
         }
 
+    async def create_profile_message_blocks(
+        self,
+        *,
+        batch_message_limit: int,
+        min_batch_messages: int,
+        batch_overlap: int,
+        max_blocks: int = 8,
+    ) -> int:
+        await self.initialize()
+        assert self._conn is not None
+
+        limit = max(int(batch_message_limit or 40), 8)
+        min_count = min(max(int(min_batch_messages or 12), 4), limit)
+        overlap = min(max(int(batch_overlap or 0), 0), limit - 1)
+        advance = max(limit - overlap, 1)
+        max_blocks = max(int(max_blocks or 8), 1)
+        now = int(time.time())
+        created = 0
+
+        groups = await self._fetchall(
+            """
+            SELECT
+                platform_id,
+                group_id,
+                MAX(COALESCE(group_name, '')) AS group_name
+            FROM archived_messages
+            WHERE direction = 'incoming'
+            GROUP BY platform_id, group_id
+            ORDER BY platform_id ASC, group_id ASC
+            """,
+            (),
+        )
+
+        for group in groups:
+            if created >= max_blocks:
+                break
+            platform_id = str(group["platform_id"] or "")
+            group_id = str(group["group_id"] or "")
+            group_name = str(group["group_name"] or "")
+            cursor_key = f"profile_pipeline_cursor:{platform_id}:{group_id}"
+            cursor_value = await self._get_pipeline_state_value(cursor_key)
+            cursor_id = int(cursor_value or 0)
+
+            while created < max_blocks:
+                rows = await self._fetchall(
+                    """
+                    SELECT
+                        id,
+                        event_time,
+                        group_name,
+                        plain_text
+                    FROM archived_messages
+                    WHERE direction = 'incoming'
+                      AND platform_id = ?
+                      AND group_id = ?
+                      AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (platform_id, group_id, cursor_id, limit),
+                )
+                if len(rows) < min_count:
+                    break
+
+                first_row = rows[0]
+                last_row = rows[-1]
+                first_id = int(first_row["id"])
+                last_id = int(last_row["id"])
+                message_row_ids = [int(row["id"]) for row in rows]
+                approx_chars = sum(len(str(row["plain_text"] or "")) for row in rows)
+                block_key = f"{platform_id}:{group_id}:{first_id}:{last_id}"
+
+                existing = await self._fetchone(
+                    """
+                    SELECT id
+                    FROM profile_message_blocks
+                    WHERE block_key = ?
+                    """,
+                    (block_key,),
+                )
+                block_id: int
+                if existing is None:
+                    cursor = await self._conn.execute(
+                        """
+                        INSERT INTO profile_message_blocks (
+                            block_key,
+                            platform_id,
+                            group_id,
+                            group_name,
+                            start_message_row_id,
+                            end_message_row_id,
+                            message_row_ids_json,
+                            context_message_row_ids_json,
+                            message_count,
+                            approx_text_chars,
+                            first_event_at,
+                            last_event_at,
+                            status,
+                            created_at,
+                            updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            block_key,
+                            platform_id,
+                            group_id,
+                            str(last_row["group_name"] or group_name or ""),
+                            first_id,
+                            last_id,
+                            self._to_json(message_row_ids),
+                            self._to_json(message_row_ids),
+                            len(message_row_ids),
+                            approx_chars,
+                            int(first_row["event_time"] or now),
+                            int(last_row["event_time"] or now),
+                            "pending",
+                            now,
+                            now,
+                        ),
+                    )
+                    block_id = int(cursor.lastrowid)
+                    await self._conn.execute(
+                        """
+                        INSERT INTO profile_extraction_jobs (
+                            block_id,
+                            status,
+                            priority,
+                            scheduled_at,
+                            updated_at
+                        ) VALUES (?, 'pending', 100, ?, ?)
+                        """,
+                        (block_id, now, now),
+                    )
+                    created += 1
+                else:
+                    block_id = int(existing["id"])
+                    await self._conn.execute(
+                        """
+                        INSERT OR IGNORE INTO profile_extraction_jobs (
+                            block_id,
+                            status,
+                            priority,
+                            scheduled_at,
+                            updated_at
+                        ) VALUES (?, 'pending', 100, ?, ?)
+                        """,
+                        (block_id, now, now),
+                    )
+
+                cursor_index = min(advance, len(rows)) - 1
+                cursor_id = int(rows[cursor_index]["id"])
+                await self._set_pipeline_state_value(cursor_key, str(cursor_id), now=now)
+
+                if len(rows) < limit:
+                    break
+
+        if created:
+            await self._conn.commit()
+        return created
+
+    async def claim_next_profile_job(self) -> dict[str, object] | None:
+        await self.initialize()
+        assert self._conn is not None
+
+        row = await self._fetchone(
+            """
+            SELECT
+                j.*,
+                b.block_key,
+                b.platform_id,
+                b.group_id,
+                b.group_name
+            FROM profile_extraction_jobs j
+            JOIN profile_message_blocks b ON b.id = j.block_id
+            WHERE j.status IN ('pending', 'failed')
+            ORDER BY j.priority ASC, j.scheduled_at ASC, j.id ASC
+            LIMIT 1
+            """,
+            (),
+        )
+        if row is None:
+            return None
+
+        now = int(time.time())
+        await self._conn.execute(
+            """
+            UPDATE profile_extraction_jobs
+            SET status = 'running',
+                attempt_count = attempt_count + 1,
+                started_at = ?,
+                updated_at = ?,
+                last_error = ''
+            WHERE id = ?
+            """,
+            (now, now, int(row["id"])),
+        )
+        await self._conn.execute(
+            """
+            UPDATE profile_message_blocks
+            SET status = 'running',
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, int(row["block_id"])),
+        )
+        await self._conn.commit()
+        payload = dict(row)
+        payload["workflow_state"] = self._from_json(payload.pop("workflow_state_json", None)) or {}
+        payload["result_summary"] = self._from_json(payload.pop("result_summary_json", None)) or {}
+        return payload
+
+    async def get_profile_job_context(self, job_id: int) -> dict[str, object] | None:
+        await self.initialize()
+        assert self._conn is not None
+
+        row = await self._fetchone(
+            """
+            SELECT
+                j.*,
+                b.block_key,
+                b.platform_id,
+                b.group_id,
+                b.group_name,
+                b.message_row_ids_json,
+                b.context_message_row_ids_json,
+                b.message_count,
+                b.approx_text_chars,
+                b.first_event_at,
+                b.last_event_at
+            FROM profile_extraction_jobs j
+            JOIN profile_message_blocks b ON b.id = j.block_id
+            WHERE j.id = ?
+            """,
+            (int(job_id),),
+        )
+        if row is None:
+            return None
+
+        payload = dict(row)
+        message_row_ids = [
+            int(value)
+            for value in self._from_json(payload.get("message_row_ids_json")) or []
+            if str(value).strip()
+        ]
+        messages = await self._fetch_messages_by_ids(message_row_ids)
+
+        payload["workflow_state"] = self._from_json(payload.pop("workflow_state_json", None)) or {}
+        payload["result_summary"] = self._from_json(payload.pop("result_summary_json", None)) or {}
+        payload["message_row_ids"] = message_row_ids
+        payload["messages"] = messages
+        payload.pop("message_row_ids_json", None)
+        payload.pop("context_message_row_ids_json", None)
+        return payload
+
+    async def get_profile_resolution_context(
+        self,
+        *,
+        platform_id: str,
+        group_id: str,
+        subject_user_ids: list[str],
+        attribute_types: list[str],
+        limit_per_attribute: int = 8,
+    ) -> dict[str, object]:
+        await self.initialize()
+        assert self._conn is not None
+
+        users = [str(value).strip() for value in subject_user_ids if str(value).strip()]
+        attrs = [str(value).strip() for value in attribute_types if str(value).strip()]
+        if not users or not attrs:
+            return {"attributes": [], "recent_claims": []}
+
+        user_placeholders = ", ".join("?" for _ in users)
+        attr_placeholders = ", ".join("?" for _ in attrs)
+
+        attribute_rows = await self._fetchall(
+            f"""
+            SELECT *
+            FROM profile_attributes
+            WHERE platform_id = ?
+              AND group_id = ?
+              AND subject_user_id IN ({user_placeholders})
+              AND attribute_type IN ({attr_placeholders})
+            """,
+            tuple([platform_id, group_id, *users, *attrs]),
+        )
+        claim_rows = await self._fetchall(
+            f"""
+            SELECT *
+            FROM profile_claims
+            WHERE platform_id = ?
+              AND group_id = ?
+              AND subject_user_id IN ({user_placeholders})
+              AND attribute_type IN ({attr_placeholders})
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(
+                [platform_id, group_id, *users, *attrs, max(limit_per_attribute * len(users) * len(attrs), 16)]
+            ),
+        )
+        return {
+            "attributes": [dict(row) for row in attribute_rows],
+            "recent_claims": [self._claim_row_to_dict(row) for row in claim_rows],
+        }
+
+    async def apply_profile_resolution(
+        self,
+        *,
+        job_id: int,
+        resolved_claims: list[dict[str, object]],
+        summary: dict[str, object] | None = None,
+        workflow_state: dict[str, object] | None = None,
+        block_messages: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        await self.initialize()
+        assert self._conn is not None
+
+        job_context = await self.get_profile_job_context(job_id)
+        if job_context is None:
+            return {"inserted_claims": 0, "updated_attributes": 0}
+
+        now = int(time.time())
+        platform_id = str(job_context.get("platform_id") or "")
+        group_id = str(job_context.get("group_id") or "")
+        group_name = str(job_context.get("group_name") or "")
+        messages = list(block_messages or job_context.get("messages") or [])
+        message_time_map = {
+            int(message["id"]): int(message.get("event_time") or now)
+            for message in messages
+            if str(message.get("id", "")).strip()
+        }
+
+        inserted_claims = 0
+        updated_attributes = 0
+
+        for payload in resolved_claims:
+            subject_user_id = str(payload.get("subject_user_id") or "").strip()
+            attribute_type = str(payload.get("attribute_type") or "").strip()
+            normalized_value = str(payload.get("normalized_value") or "").strip()
+            if not subject_user_id or not attribute_type or not normalized_value:
+                continue
+
+            evidence_ids = sorted(
+                {
+                    int(value)
+                    for value in payload.get("evidence_message_row_ids", []) or []
+                    if str(value).strip()
+                }
+            )
+            evidence_times = [
+                message_time_map.get(message_id, now) for message_id in evidence_ids
+            ]
+            first_seen_at = min(evidence_times or [now])
+            last_seen_at = max(evidence_times or [now])
+            status = str(payload.get("status") or "candidate")
+            current_value = bool(payload.get("current_value", False))
+
+            cursor = await self._conn.execute(
+                """
+                INSERT INTO profile_claims (
+                    platform_id,
+                    group_id,
+                    group_name,
+                    subject_user_id,
+                    source_message_row_id,
+                    attribute_type,
+                    raw_value,
+                    normalized_value,
+                    source_kind,
+                    tense,
+                    polarity,
+                    confidence,
+                    status,
+                    resolver_note,
+                    first_seen_at,
+                    last_seen_at,
+                    created_at,
+                    updated_at,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    platform_id,
+                    group_id,
+                    group_name,
+                    subject_user_id,
+                    evidence_ids[0] if evidence_ids else None,
+                    attribute_type,
+                    str(payload.get("raw_value") or ""),
+                    normalized_value,
+                    str(payload.get("source_kind") or "unknown"),
+                    str(payload.get("tense") or "unknown"),
+                    str(payload.get("polarity") or "affirmed"),
+                    float(payload.get("confidence", 0.0) or 0.0),
+                    status,
+                    str(payload.get("note") or ""),
+                    first_seen_at,
+                    last_seen_at,
+                    now,
+                    now,
+                    self._to_json(payload.get("payload")),
+                ),
+            )
+            claim_id = int(cursor.lastrowid)
+            inserted_claims += 1
+
+            for superseded_id in payload.get("supersedes_claim_ids", []) or []:
+                if not str(superseded_id).strip():
+                    continue
+                await self._conn.execute(
+                    """
+                    UPDATE profile_claims
+                    SET status = 'outdated',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, int(superseded_id)),
+                )
+
+            for message_id in evidence_ids:
+                await self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO profile_claim_evidence (
+                        claim_id,
+                        message_row_id,
+                        excerpt,
+                        evidence_kind,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        claim_id,
+                        message_id,
+                        str(payload.get("evidence_excerpt") or ""),
+                        "message",
+                        now,
+                    ),
+                )
+
+            if not current_value:
+                continue
+
+            previous = await self._fetchone(
+                """
+                SELECT current_claim_id
+                FROM profile_attributes
+                WHERE platform_id = ?
+                  AND group_id = ?
+                  AND subject_user_id = ?
+                  AND attribute_type = ?
+                """,
+                (platform_id, group_id, subject_user_id, attribute_type),
+            )
+            previous_claim_id = (
+                int(previous["current_claim_id"])
+                if previous is not None and previous["current_claim_id"] is not None
+                else None
+            )
+            await self._conn.execute(
+                """
+                INSERT INTO profile_attributes (
+                    platform_id,
+                    group_id,
+                    group_name,
+                    subject_user_id,
+                    attribute_type,
+                    current_claim_id,
+                    current_value,
+                    normalized_value,
+                    confidence,
+                    source_kind,
+                    first_seen_at,
+                    last_seen_at,
+                    evidence_count,
+                    updated_at,
+                    status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform_id, group_id, subject_user_id, attribute_type)
+                DO UPDATE SET
+                    group_name = excluded.group_name,
+                    current_claim_id = excluded.current_claim_id,
+                    current_value = excluded.current_value,
+                    normalized_value = excluded.normalized_value,
+                    confidence = excluded.confidence,
+                    source_kind = excluded.source_kind,
+                    first_seen_at = MIN(profile_attributes.first_seen_at, excluded.first_seen_at),
+                    last_seen_at = MAX(profile_attributes.last_seen_at, excluded.last_seen_at),
+                    evidence_count = excluded.evidence_count,
+                    updated_at = excluded.updated_at,
+                    status = excluded.status
+                """,
+                (
+                    platform_id,
+                    group_id,
+                    group_name,
+                    subject_user_id,
+                    attribute_type,
+                    claim_id,
+                    str(payload.get("raw_value") or ""),
+                    normalized_value,
+                    float(payload.get("confidence", 0.0) or 0.0),
+                    str(payload.get("source_kind") or "unknown"),
+                    first_seen_at,
+                    last_seen_at,
+                    len(evidence_ids),
+                    now,
+                    status,
+                ),
+            )
+            await self._conn.execute(
+                """
+                INSERT INTO profile_attribute_history (
+                    platform_id,
+                    group_id,
+                    subject_user_id,
+                    attribute_type,
+                    claim_id,
+                    previous_claim_id,
+                    action,
+                    created_at,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    platform_id,
+                    group_id,
+                    subject_user_id,
+                    attribute_type,
+                    claim_id,
+                    previous_claim_id,
+                    "set_current",
+                    now,
+                    self._to_json(
+                        {
+                            "status": status,
+                            "note": str(payload.get("note") or ""),
+                        }
+                    ),
+                ),
+            )
+            updated_attributes += 1
+
+        await self._conn.execute(
+            """
+            UPDATE profile_extraction_jobs
+            SET status = 'completed',
+                finished_at = ?,
+                updated_at = ?,
+                result_summary_json = ?,
+                workflow_state_json = ?
+            WHERE id = ?
+            """,
+            (
+                now,
+                now,
+                self._to_json(
+                    {
+                        **dict(summary or {}),
+                        "inserted_claims": inserted_claims,
+                        "updated_attributes": updated_attributes,
+                    }
+                ),
+                self._to_json(workflow_state),
+                int(job_id),
+            ),
+        )
+        await self._conn.execute(
+            """
+            UPDATE profile_message_blocks
+            SET status = 'completed',
+                updated_at = ?
+            WHERE id = (
+                SELECT block_id
+                FROM profile_extraction_jobs
+                WHERE id = ?
+            )
+            """,
+            (now, int(job_id)),
+        )
+        await self._conn.commit()
+        return {
+            "inserted_claims": inserted_claims,
+            "updated_attributes": updated_attributes,
+        }
+
+    async def complete_profile_job(
+        self,
+        *,
+        job_id: int,
+        summary: dict[str, object] | None = None,
+        workflow_state: dict[str, object] | None = None,
+        block_status: str = "completed",
+    ):
+        await self.initialize()
+        assert self._conn is not None
+
+        now = int(time.time())
+        await self._conn.execute(
+            """
+            UPDATE profile_extraction_jobs
+            SET status = 'completed',
+                finished_at = ?,
+                updated_at = ?,
+                result_summary_json = ?,
+                workflow_state_json = ?
+            WHERE id = ?
+            """,
+            (
+                now,
+                now,
+                self._to_json(summary),
+                self._to_json(workflow_state),
+                int(job_id),
+            ),
+        )
+        await self._conn.execute(
+            """
+            UPDATE profile_message_blocks
+            SET status = ?,
+                updated_at = ?
+            WHERE id = (
+                SELECT block_id
+                FROM profile_extraction_jobs
+                WHERE id = ?
+            )
+            """,
+            (block_status, now, int(job_id)),
+        )
+        await self._conn.commit()
+
+    async def fail_profile_job(
+        self,
+        *,
+        job_id: int,
+        error_text: str,
+        workflow_state: dict[str, object] | None = None,
+    ):
+        await self.initialize()
+        assert self._conn is not None
+
+        now = int(time.time())
+        await self._conn.execute(
+            """
+            UPDATE profile_extraction_jobs
+            SET status = 'failed',
+                finished_at = ?,
+                updated_at = ?,
+                last_error = ?,
+                workflow_state_json = ?
+            WHERE id = ?
+            """,
+            (now, now, error_text[:1000], self._to_json(workflow_state), int(job_id)),
+        )
+        await self._conn.execute(
+            """
+            UPDATE profile_message_blocks
+            SET status = 'failed',
+                updated_at = ?
+            WHERE id = (
+                SELECT block_id
+                FROM profile_extraction_jobs
+                WHERE id = ?
+            )
+            """,
+            (now, int(job_id)),
+        )
+        await self._conn.commit()
+
     async def _create_schema(self):
         assert self._conn is not None
         await self._conn.executescript(
@@ -1422,6 +2091,139 @@ class ArchiveDatabase:
 
             CREATE INDEX IF NOT EXISTS idx_profile_interactions_target
             ON profile_interactions (platform_id, group_id, target_user_id, interaction_count DESC, last_seen_at DESC);
+
+            CREATE TABLE IF NOT EXISTS profile_pipeline_state (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_message_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_key TEXT NOT NULL UNIQUE,
+                platform_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                group_name TEXT NOT NULL DEFAULT '',
+                start_message_row_id INTEGER NOT NULL,
+                end_message_row_id INTEGER NOT NULL,
+                message_row_ids_json TEXT NOT NULL DEFAULT '[]',
+                context_message_row_ids_json TEXT NOT NULL DEFAULT '[]',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                approx_text_chars INTEGER NOT NULL DEFAULT 0,
+                first_event_at INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_profile_message_blocks_scope
+            ON profile_message_blocks (platform_id, group_id, status, last_event_at DESC);
+
+            CREATE TABLE IF NOT EXISTS profile_extraction_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_id INTEGER NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                priority INTEGER NOT NULL DEFAULT 100,
+                judge_model TEXT NOT NULL DEFAULT '',
+                extract_model TEXT NOT NULL DEFAULT '',
+                resolve_model TEXT NOT NULL DEFAULT '',
+                scheduled_at INTEGER NOT NULL,
+                started_at INTEGER,
+                finished_at INTEGER,
+                updated_at INTEGER NOT NULL,
+                last_error TEXT NOT NULL DEFAULT '',
+                workflow_state_json TEXT NOT NULL DEFAULT '{}',
+                result_summary_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(block_id) REFERENCES profile_message_blocks(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_profile_extraction_jobs_status
+            ON profile_extraction_jobs (status, priority, scheduled_at);
+
+            CREATE TABLE IF NOT EXISTS profile_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                group_name TEXT NOT NULL DEFAULT '',
+                subject_user_id TEXT NOT NULL,
+                source_message_row_id INTEGER,
+                attribute_type TEXT NOT NULL,
+                raw_value TEXT NOT NULL DEFAULT '',
+                normalized_value TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'unknown',
+                tense TEXT NOT NULL DEFAULT 'unknown',
+                polarity TEXT NOT NULL DEFAULT 'affirmed',
+                confidence REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                resolver_note TEXT NOT NULL DEFAULT '',
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(source_message_row_id) REFERENCES archived_messages(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_profile_claims_lookup
+            ON profile_claims (platform_id, group_id, subject_user_id, attribute_type, status, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS profile_claim_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_id INTEGER NOT NULL,
+                message_row_id INTEGER NOT NULL,
+                excerpt TEXT NOT NULL DEFAULT '',
+                evidence_kind TEXT NOT NULL DEFAULT 'message',
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(claim_id) REFERENCES profile_claims(id) ON DELETE CASCADE,
+                FOREIGN KEY(message_row_id) REFERENCES archived_messages(id) ON DELETE CASCADE,
+                UNIQUE(claim_id, message_row_id, evidence_kind, excerpt)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_profile_claim_evidence_claim
+            ON profile_claim_evidence (claim_id, message_row_id);
+
+            CREATE TABLE IF NOT EXISTS profile_attributes (
+                platform_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                group_name TEXT NOT NULL DEFAULT '',
+                subject_user_id TEXT NOT NULL,
+                attribute_type TEXT NOT NULL,
+                current_claim_id INTEGER,
+                current_value TEXT NOT NULL DEFAULT '',
+                normalized_value TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                source_kind TEXT NOT NULL DEFAULT 'unknown',
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                evidence_count INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                PRIMARY KEY (platform_id, group_id, subject_user_id, attribute_type),
+                FOREIGN KEY(current_claim_id) REFERENCES profile_claims(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_profile_attributes_subject
+            ON profile_attributes (platform_id, group_id, subject_user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS profile_attribute_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                subject_user_id TEXT NOT NULL,
+                attribute_type TEXT NOT NULL,
+                claim_id INTEGER,
+                previous_claim_id INTEGER,
+                action TEXT NOT NULL DEFAULT 'set_current',
+                created_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(claim_id) REFERENCES profile_claims(id) ON DELETE SET NULL,
+                FOREIGN KEY(previous_claim_id) REFERENCES profile_claims(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_profile_attribute_history_subject
+            ON profile_attribute_history (platform_id, group_id, subject_user_id, attribute_type, created_at DESC);
             """
         )
 
@@ -1556,6 +2358,82 @@ class ArchiveDatabase:
                 updated_at = excluded.updated_at
         """
 
+    async def _get_pipeline_state_value(self, state_key: str) -> str | None:
+        row = await self._fetchone(
+            """
+            SELECT state_value
+            FROM profile_pipeline_state
+            WHERE state_key = ?
+            """,
+            (state_key,),
+        )
+        if row is None:
+            return None
+        return str(row["state_value"] or "")
+
+    async def _set_pipeline_state_value(
+        self,
+        state_key: str,
+        state_value: str,
+        *,
+        now: int | None = None,
+    ):
+        assert self._conn is not None
+        stamp = int(now or time.time())
+        await self._conn.execute(
+            """
+            INSERT INTO profile_pipeline_state (
+                state_key,
+                state_value,
+                updated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                state_value = excluded.state_value,
+                updated_at = excluded.updated_at
+            """,
+            (state_key, state_value, stamp),
+        )
+
+    async def _fetch_messages_by_ids(
+        self,
+        message_row_ids: list[int],
+    ) -> list[dict[str, object]]:
+        if not message_row_ids:
+            return []
+        placeholders = ", ".join("?" for _ in message_row_ids)
+        message_rows = await self._fetchall(
+            f"""
+            SELECT *
+            FROM archived_messages
+            WHERE id IN ({placeholders})
+            """,
+            tuple(message_row_ids),
+        )
+        if not message_rows:
+            return []
+
+        segment_rows = await self._fetchall(
+            f"""
+            SELECT *
+            FROM archived_segments
+            WHERE message_row_id IN ({placeholders})
+            ORDER BY message_row_id ASC, seg_index ASC, id ASC
+            """,
+            tuple(message_row_ids),
+        )
+        segment_map: dict[int, list[dict[str, object]]] = defaultdict(list)
+        for row in segment_rows:
+            segment_map[int(row["message_row_id"])].append(self._segment_row_to_dict(row))
+
+        message_map: dict[int, dict[str, object]] = {}
+        for row in message_rows:
+            payload = dict(row)
+            payload["raw_event"] = self._from_json(payload.pop("raw_event_json", None))
+            payload["segments"] = segment_map.get(int(payload["id"]), [])
+            message_map[int(payload["id"])] = payload
+
+        return [message_map[message_id] for message_id in message_row_ids if message_id in message_map]
+
     @staticmethod
     def _date_key(event_time: int) -> str:
         return time.strftime("%Y-%m-%d", time.localtime(event_time))
@@ -1598,4 +2476,9 @@ class ArchiveDatabase:
     def _forward_node_row_to_dict(self, row) -> dict[str, object]:
         payload = dict(row)
         payload["content"] = self._from_json(payload.pop("content_json", None))
+        return payload
+
+    def _claim_row_to_dict(self, row) -> dict[str, object]:
+        payload = dict(row)
+        payload["payload"] = self._from_json(payload.pop("payload_json", None))
         return payload
