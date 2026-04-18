@@ -90,9 +90,9 @@
   "profile_pipeline_mode": {
     "type": "string",
     "description": "Profile pipeline model mode",
-    "options": ["heuristic", "noop"],
+    "options": ["heuristic", "astrbot_llm", "noop"],
     "default": "heuristic",
-    "hint": "heuristic uses built-in keyword and regex extraction to validate the LangGraph workflow. noop keeps the pipeline structure but does not emit claims."
+    "hint": "heuristic uses built-in keyword and regex extraction to validate the LangGraph workflow. astrbot_llm uses AstrBot's native llm_generate interface with provider/model IDs from this plugin config. noop keeps the pipeline structure but does not emit claims."
   },
   "profile_pipeline_poll_interval_sec": {
     "type": "int",
@@ -123,5 +123,65 @@
     "description": "Maximum profile jobs per poll cycle",
     "default": 2,
     "hint": "Controls how many LangGraph jobs the background runner executes in one polling round."
+  },
+  "profile_pipeline_provider_id": {
+    "type": "string",
+    "description": "Shared profile pipeline provider ID",
+    "default": "",
+    "hint": "AstrBot provider ID used by all profile stages when a stage-specific provider ID is empty. Leave blank to fall back to AstrBot's current default chat provider."
+  },
+  "profile_pipeline_model": {
+    "type": "string",
+    "description": "Shared profile pipeline model name",
+    "default": "",
+    "hint": "Optional default model name for all profile stages. Leave blank to use the provider's current model."
+  },
+  "profile_pipeline_judge_provider_id": {
+    "type": "string",
+    "description": "Judge-stage provider ID",
+    "default": "",
+    "hint": "Optional AstrBot provider ID for the batch judge stage."
+  },
+  "profile_pipeline_judge_model": {
+    "type": "string",
+    "description": "Judge-stage model name",
+    "default": "",
+    "hint": "Optional model name for the judge stage."
+  },
+  "profile_pipeline_extract_provider_id": {
+    "type": "string",
+    "description": "Extract-stage provider ID",
+    "default": "",
+    "hint": "Optional AstrBot provider ID for the structured claim extraction stage."
+  },
+  "profile_pipeline_extract_model": {
+    "type": "string",
+    "description": "Extract-stage model name",
+    "default": "",
+    "hint": "Optional model name for the extraction stage."
+  },
+  "profile_pipeline_resolve_provider_id": {
+    "type": "string",
+    "description": "Resolve-stage provider ID",
+    "default": "",
+    "hint": "Optional AstrBot provider ID for the semantic dedupe and conflict-resolution stage."
+  },
+  "profile_pipeline_resolve_model": {
+    "type": "string",
+    "description": "Resolve-stage model name",
+    "default": "",
+    "hint": "Optional model name for the resolver stage."
+  },
+  "profile_pipeline_extract_include_images": {
+    "type": "bool",
+    "description": "Include archived images in extract stage",
+    "default": true,
+    "hint": "When enabled, the extraction stage sends stored or source image URLs to a multimodal model through AstrBot's llm_generate interface."
+  },
+  "profile_pipeline_extract_max_images": {
+    "type": "int",
+    "description": "Maximum images per extract call",
+    "default": 4,
+    "hint": "Upper bound of archived images attached to one extraction request."
   }
 }

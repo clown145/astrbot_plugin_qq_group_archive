@@ -27,6 +27,8 @@ class QQGroupArchivePlugin(Star):
         self.profile_pipeline = ProfilePipelineService(
             db=self.db,
             config=config,
+            context=context,
+            data_dir=self.data_dir,
         )
         self.service.profile_pipeline = self.profile_pipeline
         self.webui: ArchiveWebUIServer | None = None

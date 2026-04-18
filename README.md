@@ -95,12 +95,18 @@ WebUI-specific fields:
 Profile-pipeline fields:
 
 - `profile_pipeline_enabled`: enable the LangGraph-based portrait pipeline
-- `profile_pipeline_mode`: `heuristic` or `noop`
+- `profile_pipeline_mode`: `heuristic`, `astrbot_llm`, or `noop`
 - `profile_pipeline_poll_interval_sec`: background poll interval
 - `profile_pipeline_batch_message_limit`: max incoming messages per batch
 - `profile_pipeline_min_batch_messages`: minimum unseen messages before a batch is created
 - `profile_pipeline_batch_overlap`: repeated context between neighboring batches
 - `profile_pipeline_max_jobs_per_tick`: max profile jobs handled in one poll round
+- `profile_pipeline_provider_id` / `profile_pipeline_model`: shared AstrBot provider ID and model name
+- `profile_pipeline_judge_provider_id` / `profile_pipeline_judge_model`: optional stage override
+- `profile_pipeline_extract_provider_id` / `profile_pipeline_extract_model`: optional stage override
+- `profile_pipeline_resolve_provider_id` / `profile_pipeline_resolve_model`: optional stage override
+- `profile_pipeline_extract_include_images`: send archived images to multimodal extraction calls
+- `profile_pipeline_extract_max_images`: cap image count per extraction request
 
 ## Commands
 
@@ -178,11 +184,20 @@ When `profile_pipeline_enabled` is on, the plugin runs a fixed workflow:
 4. Resolve duplicates / conflicts against current attributes
 5. Persist claim, evidence, and attribute updates back into `archive.db`
 
-Current `heuristic` mode is a bootstrap implementation used to validate the
-workflow and schema without depending on an external LLM provider. The workflow
-is already isolated behind `ProfilePipelineLLM`, so a real LLM-backed judge /
-extractor / resolver can replace it later without changing the storage or
-LangGraph orchestration layer.
+Current modes:
+
+- `heuristic`
+  Bootstrap implementation used to validate the workflow and schema without
+  depending on an external LLM provider.
+- `astrbot_llm`
+  Calls AstrBot's native `Context.llm_generate(...)` interface and lets you pick
+  provider IDs / model names directly from plugin config.
+- `noop`
+  Keeps the workflow structure but does not emit claims.
+
+The workflow is isolated behind `ProfilePipelineLLM`, so you can switch from
+heuristic mode to `astrbot_llm` without changing the storage or LangGraph
+orchestration layer.
 
 Typical `archived_messages` row:
 

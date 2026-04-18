@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TypedDict
 
 from astrbot.api import logger
+from astrbot.api.star import Context
 
 from .config import PluginSettings
 from .profile_llm import ProfilePipelineLLM, build_profile_llm
@@ -36,6 +38,8 @@ class ProfileWorkflowState(TypedDict, total=False):
 class ProfilePipelineService:
     db: ArchiveDatabase
     config: Any
+    context: Context
+    data_dir: Path
     llm_client: ProfilePipelineLLM | None = None
     _runner_task: asyncio.Task | None = None
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -141,7 +145,12 @@ class ProfilePipelineService:
     def _ensure_llm(self, settings: PluginSettings):
         mode = settings.profile_pipeline_mode
         if self.llm_client is None or self._llm_mode != mode:
-            self.llm_client = build_profile_llm(mode)
+            self.llm_client = build_profile_llm(
+                mode,
+                context=self.context,
+                config=self.config,
+                data_dir=self.data_dir,
+            )
             self._llm_mode = mode
 
     def _build_graph(self):

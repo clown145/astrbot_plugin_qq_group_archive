@@ -26,6 +26,16 @@ class PluginSettings:
     profile_pipeline_min_batch_messages: int = 12
     profile_pipeline_batch_overlap: int = 8
     profile_pipeline_max_jobs_per_tick: int = 2
+    profile_pipeline_provider_id: str = ""
+    profile_pipeline_model: str = ""
+    profile_pipeline_judge_provider_id: str = ""
+    profile_pipeline_judge_model: str = ""
+    profile_pipeline_extract_provider_id: str = ""
+    profile_pipeline_extract_model: str = ""
+    profile_pipeline_resolve_provider_id: str = ""
+    profile_pipeline_resolve_model: str = ""
+    profile_pipeline_extract_include_images: bool = True
+    profile_pipeline_extract_max_images: int = 4
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> "PluginSettings":
@@ -75,6 +85,36 @@ class PluginSettings:
             profile_pipeline_max_jobs_per_tick=max(
                 int(values.get("profile_pipeline_max_jobs_per_tick", 2) or 2), 1
             ),
+            profile_pipeline_provider_id=str(
+                values.get("profile_pipeline_provider_id", "")
+            ).strip(),
+            profile_pipeline_model=str(
+                values.get("profile_pipeline_model", "")
+            ).strip(),
+            profile_pipeline_judge_provider_id=str(
+                values.get("profile_pipeline_judge_provider_id", "")
+            ).strip(),
+            profile_pipeline_judge_model=str(
+                values.get("profile_pipeline_judge_model", "")
+            ).strip(),
+            profile_pipeline_extract_provider_id=str(
+                values.get("profile_pipeline_extract_provider_id", "")
+            ).strip(),
+            profile_pipeline_extract_model=str(
+                values.get("profile_pipeline_extract_model", "")
+            ).strip(),
+            profile_pipeline_resolve_provider_id=str(
+                values.get("profile_pipeline_resolve_provider_id", "")
+            ).strip(),
+            profile_pipeline_resolve_model=str(
+                values.get("profile_pipeline_resolve_model", "")
+            ).strip(),
+            profile_pipeline_extract_include_images=bool(
+                values.get("profile_pipeline_extract_include_images", True)
+            ),
+            profile_pipeline_extract_max_images=max(
+                int(values.get("profile_pipeline_extract_max_images", 4) or 4), 0
+            ),
         )
 
     @property
@@ -109,3 +149,23 @@ class PluginSettings:
     @staticmethod
     def _normalize(value: str) -> str:
         return str(value or "").strip().lower()
+
+    def get_profile_stage_provider_id(self, stage: str) -> str:
+        stage_name = str(stage or "").strip().lower()
+        if stage_name == "judge" and self.profile_pipeline_judge_provider_id:
+            return self.profile_pipeline_judge_provider_id
+        if stage_name == "extract" and self.profile_pipeline_extract_provider_id:
+            return self.profile_pipeline_extract_provider_id
+        if stage_name == "resolve" and self.profile_pipeline_resolve_provider_id:
+            return self.profile_pipeline_resolve_provider_id
+        return self.profile_pipeline_provider_id
+
+    def get_profile_stage_model(self, stage: str) -> str:
+        stage_name = str(stage or "").strip().lower()
+        if stage_name == "judge" and self.profile_pipeline_judge_model:
+            return self.profile_pipeline_judge_model
+        if stage_name == "extract" and self.profile_pipeline_extract_model:
+            return self.profile_pipeline_extract_model
+        if stage_name == "resolve" and self.profile_pipeline_resolve_model:
+            return self.profile_pipeline_resolve_model
+        return self.profile_pipeline_model

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
+from astrbot.api.star import Context
+
+from .config import PluginSettings
 from .profile_pipeline_models import (
     CandidateSpan,
     ExtractedClaim,
@@ -657,8 +662,283 @@ class NoopProfileLLM:
         return ResolutionResult(summary={"mode": "noop", "resolved_count": 0})
 
 
-def build_profile_llm(mode: str) -> ProfilePipelineLLM:
+@dataclass(slots=True)
+class AstrBotProfileLLM:
+    context: Context
+    config: Any
+    data_dir: Path
+    fallback: HeuristicProfileLLM = field(default_factory=HeuristicProfileLLM)
+
+    async def judge_block(self, block: dict[str, Any]) -> JudgeResult:
+        payload = {
+            "platform_id": str(block.get("platform_id") or ""),
+            "group_id": str(block.get("group_id") or ""),
+            "group_name": str(block.get("group_name") or ""),
+            "message_count": len(block.get("messages", []) or []),
+            "messages": self._serialize_messages(block.get("messages", []) or []),
+        }
+        prompt = (
+            "你在做群聊人物画像预筛选。请只找出“值得进一步提取画像事实”的消息片段。"
+            "不要总结人物，不要脑补，不要输出解释性自然语言。"
+            "返回 JSON，格式为 "
+            '{"candidate_spans":[{"message_row_ids":[1,2],"subject_user_ids":["123"],'
+            '"claim_types":["education_university"],"reason":"...","need_image_context":false}],'
+            '"summary":{"candidate_count":1}}。'
+            "claim_types 只能从这些枚举中选择："
+            '["education_university","education_major","device_phone","appearance_hair","schedule_status","location_hint"]。'
+            "如果没有值得提取的信息，candidate_spans 返回空数组。"
+            "\n\n批次数据如下：\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+        try:
+            data = await self._call_json_stage("judge", prompt=prompt)
+        except Exception:
+            return await self.fallback.judge_block(block)
+
+        spans = [
+            CandidateSpan.from_mapping(item)
+            for item in data.get("candidate_spans", []) or []
+        ]
+        return JudgeResult(
+            candidate_spans=spans,
+            summary=dict(data.get("summary", {}) or {})
+            | {"mode": "astrbot_llm", "candidate_count": len(spans)},
+        )
+
+    async def extract_claims(
+        self,
+        block: dict[str, Any],
+        candidate_span: CandidateSpan,
+    ) -> list[ExtractedClaim]:
+        messages = list(block.get("messages", []) or [])
+        target_ids = set(candidate_span.message_row_ids)
+        selected_messages = [
+            message
+            for message in messages
+            if int(message.get("id") or 0) in target_ids
+        ]
+        payload = {
+            "platform_id": str(block.get("platform_id") or ""),
+            "group_id": str(block.get("group_id") or ""),
+            "candidate_span": candidate_span.to_dict(),
+            "messages": self._serialize_messages(selected_messages),
+        }
+        prompt = (
+            "你在做群聊人物画像事实抽取。请从给定消息中提取“可以入画像的事实 claim”。"
+            "不要自由总结，不要输出多余文字，只返回 JSON。"
+            "返回格式为 "
+            '{"claims":[{"subject_user_id":"123","attribute_type":"device_phone","raw_value":"15pm",'
+            '"normalized_value":"Apple iPhone 15 Pro Max","source_kind":"self_report",'
+            '"tense":"current","polarity":"affirmed","confidence":0.82,'
+            '"evidence_message_row_ids":[1],"evidence_excerpt":"我这15pm又发烫了","payload":{}}]}。'
+            "attribute_type 只能从这些枚举中选择："
+            '["education_university","education_major","device_phone","appearance_hair","schedule_status","location_hint"]。'
+            "如果没有可抽取事实，claims 返回空数组。"
+            "\n\n候选片段如下：\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+        image_urls = self._collect_image_urls(selected_messages)
+        try:
+            data = await self._call_json_stage(
+                "extract",
+                prompt=prompt,
+                image_urls=image_urls,
+            )
+        except Exception:
+            return await self.fallback.extract_claims(block, candidate_span)
+
+        return [
+            ExtractedClaim.from_mapping(item)
+            for item in data.get("claims", []) or []
+            if str(item.get("subject_user_id", "")).strip()
+            and str(item.get("attribute_type", "")).strip()
+            and str(item.get("normalized_value", "")).strip()
+        ]
+
+    async def resolve_claims(
+        self,
+        block: dict[str, Any],
+        extracted_claims: list[ExtractedClaim],
+        resolution_context: dict[str, Any],
+    ) -> ResolutionResult:
+        if not extracted_claims:
+            return ResolutionResult(
+                resolved_claims=[],
+                summary={"mode": "astrbot_llm", "resolved_count": 0},
+            )
+        payload = {
+            "platform_id": str(block.get("platform_id") or ""),
+            "group_id": str(block.get("group_id") or ""),
+            "new_claims": [item.to_dict() for item in extracted_claims],
+            "existing_attributes": list(resolution_context.get("attributes", []) or []),
+            "recent_claims": list(resolution_context.get("recent_claims", []) or []),
+        }
+        prompt = (
+            "你在做群聊人物画像 claim 合并与冲突消解。"
+            "输入里有新 claim、已有当前属性、历史 claim。"
+            "你需要判断哪些 claim 应该接受、哪些只是候选、哪些会覆盖当前值。"
+            "不要输出自然语言说明，只返回 JSON。"
+            "返回格式为 "
+            '{"resolved_claims":[{"subject_user_id":"123","attribute_type":"device_phone",'
+            '"raw_value":"15pm","normalized_value":"Apple iPhone 15 Pro Max","source_kind":"self_report",'
+            '"tense":"current","polarity":"affirmed","confidence":0.86,"status":"accepted","current_value":true,'
+            '"evidence_message_row_ids":[1],"evidence_excerpt":"我这15pm又发烫了","supersedes_claim_ids":[8],'
+            '"merged_claim_ids":[],"note":"newer_stronger_claim","payload":{}}],'
+            '"summary":{"resolved_count":1}}。'
+            "status 只能是 candidate、accepted、outdated、conflicted 之一。"
+            "如果同一用户同一 attribute_type 出现多个不同值，只能有一个 current_value=true，除非所有新 claim 都不应成为当前值。"
+            "\n\n输入如下：\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+        try:
+            data = await self._call_json_stage("resolve", prompt=prompt)
+        except Exception:
+            return await self.fallback.resolve_claims(
+                block,
+                extracted_claims,
+                resolution_context,
+            )
+
+        resolved = [
+            ResolvedClaim.from_mapping(item)
+            for item in data.get("resolved_claims", []) or []
+            if str(item.get("subject_user_id", "")).strip()
+            and str(item.get("attribute_type", "")).strip()
+            and str(item.get("normalized_value", "")).strip()
+        ]
+        return ResolutionResult(
+            resolved_claims=resolved,
+            summary=dict(data.get("summary", {}) or {})
+            | {"mode": "astrbot_llm", "resolved_count": len(resolved)},
+        )
+
+    async def _call_json_stage(
+        self,
+        stage: str,
+        *,
+        prompt: str,
+        image_urls: list[str] | None = None,
+    ) -> dict[str, Any]:
+        settings = PluginSettings.from_mapping(self.config)
+        provider_id = settings.get_profile_stage_provider_id(stage)
+        if not provider_id:
+            provider = self.context.get_using_provider()
+            if provider is None:
+                raise RuntimeError(
+                    f"profile pipeline {stage} stage has no provider configured"
+                )
+            provider_id = provider.meta().id
+        kwargs: dict[str, Any] = {}
+        model_name = settings.get_profile_stage_model(stage)
+        if model_name:
+            kwargs["model"] = model_name
+        response = await self.context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=prompt,
+            system_prompt=(
+                "You are a structured information extraction engine. "
+                "Return valid JSON only."
+            ),
+            image_urls=image_urls or None,
+            **kwargs,
+        )
+        return self._parse_json_payload(response.completion_text)
+
+    def _collect_image_urls(self, messages: list[dict[str, Any]]) -> list[str]:
+        settings = PluginSettings.from_mapping(self.config)
+        if not settings.profile_pipeline_extract_include_images:
+            return []
+        image_urls: list[str] = []
+        seen: set[str] = set()
+        for message in messages:
+            for segment in message.get("segments", []) or []:
+                if str(segment.get("seg_type") or "") != "image":
+                    continue
+                local_path = str(segment.get("local_path") or "").strip()
+                source_url = str(segment.get("source_url") or "").strip()
+                candidate = ""
+                if local_path:
+                    absolute = self.data_dir / local_path
+                    if absolute.exists():
+                        candidate = str(absolute)
+                if not candidate and source_url:
+                    candidate = source_url
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                image_urls.append(candidate)
+                if len(image_urls) >= settings.profile_pipeline_extract_max_images:
+                    return image_urls
+        return image_urls
+
+    @staticmethod
+    def _serialize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for message in messages:
+            segments = list(message.get("segments", []) or [])
+            payload.append(
+                {
+                    "id": int(message.get("id") or 0),
+                    "message_id": str(message.get("message_id") or ""),
+                    "sender_id": str(message.get("sender_id") or ""),
+                    "sender_name": str(message.get("sender_name") or ""),
+                    "sender_card": str(message.get("sender_card") or ""),
+                    "event_time": int(message.get("event_time") or 0),
+                    "plain_text": str(message.get("plain_text") or ""),
+                    "outline": str(message.get("outline") or ""),
+                    "segment_types": [
+                        str(segment.get("seg_type") or "")
+                        for segment in segments
+                    ],
+                    "image_count": sum(
+                        1 for segment in segments if str(segment.get("seg_type") or "") == "image"
+                    ),
+                }
+            )
+        return payload
+
+    @staticmethod
+    def _parse_json_payload(text: str) -> dict[str, Any]:
+        content = str(text or "").strip()
+        if not content:
+            raise ValueError("empty llm response")
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        fenced_match = re.search(r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```", content, re.S)
+        if fenced_match:
+            parsed = json.loads(fenced_match.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+
+        object_match = re.search(r"(\{.*\})", content, re.S)
+        if object_match:
+            parsed = json.loads(object_match.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        raise ValueError("llm response is not valid json")
+
+
+def build_profile_llm(
+    mode: str,
+    *,
+    context: Context | None = None,
+    config: Any = None,
+    data_dir: Path | None = None,
+) -> ProfilePipelineLLM:
     selected = str(mode or "").strip().lower()
     if selected in {"heuristic", "rules", ""}:
         return HeuristicProfileLLM()
+    if selected in {"astrbot_llm", "llm"}:
+        if context is None or data_dir is None:
+            raise ValueError("astrbot_llm mode requires plugin context and data_dir")
+        return AstrBotProfileLLM(
+            context=context,
+            config=config,
+            data_dir=data_dir,
+        )
     return NoopProfileLLM()
