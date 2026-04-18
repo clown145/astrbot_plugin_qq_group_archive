@@ -25,10 +25,12 @@ class QQGroupArchivePlugin(Star):
         )
         self.webui: ArchiveWebUIServer | None = None
 
+    async def initialize(self):
+        await self._bootstrap()
+
     @filter.on_platform_loaded()
     async def on_platform_loaded(self):
-        await self.service.initialize()
-        await self._ensure_webui()
+        await self._bootstrap()
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -63,9 +65,14 @@ class QQGroupArchivePlugin(Star):
         await self.db.close()
         logger.info("qq_group_archive terminated")
 
+    async def _bootstrap(self):
+        await self.service.initialize()
+        await self._ensure_webui()
+
     async def _ensure_webui(self):
         settings = PluginSettings.from_mapping(self.config)
         if not settings.webui_enabled:
+            logger.info("qq_group_archive webui disabled in config")
             return
         if self.webui is None:
             self.webui = ArchiveWebUIServer(
@@ -83,4 +90,7 @@ class QQGroupArchivePlugin(Star):
         try:
             await self.webui.start()
         except Exception as exc:
-            logger.error("failed to start qq_group_archive webui: %s", exc)
+            logger.error(
+                "failed to start qq_group_archive webui on "
+                f"{settings.webui_host}:{settings.webui_port}: {exc}"
+            )

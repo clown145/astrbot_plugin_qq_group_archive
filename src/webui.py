@@ -79,6 +79,10 @@ class ArchiveWebUIServer:
         return [auth_middleware]
 
     async def _auth_middleware(self, request, handler):
+        path = request.path or "/"
+        if not path.startswith("/api/"):
+            return await handler(request)
+
         token = (
             request.headers.get("X-Auth-Token", "").strip()
             or request.query.get("token", "").strip()
