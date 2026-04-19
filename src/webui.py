@@ -23,12 +23,14 @@ class ArchiveWebUIServer:
         host: str,
         port: int,
         auth_token: str = "",
+        profile_pipeline=None,
     ):
         self.data_dir = data_dir
         self.db = db
         self.host = host
         self.port = port
         self.auth_token = auth_token.strip()
+        self.profile_pipeline = profile_pipeline
         self.media_dir = self.data_dir / "media"
         self.assets_dir = Path(__file__).resolve().parent / "webui_assets"
         self._runner: web.AppRunner | None = None
@@ -98,6 +100,9 @@ class ArchiveWebUIServer:
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/api/health", self._handle_health)
         app.router.add_get("/api/overview", self._handle_overview)
+        app.router.add_get("/api/profile-pipeline/status", self._handle_profile_pipeline_status)
+        app.router.add_post("/api/profile-pipeline/wake", self._handle_profile_pipeline_wake)
+        app.router.add_post("/api/profile-pipeline/reset", self._handle_profile_pipeline_reset)
         app.router.add_get("/api/groups", self._handle_groups)
         app.router.add_get("/api/profiles/group", self._handle_group_profile_summary)
         app.router.add_get("/api/profiles/users", self._handle_group_profile_users)
@@ -133,6 +138,73 @@ class ArchiveWebUIServer:
 
     async def _handle_overview(self, _request):
         return self._json_response(await self.db.get_overview())
+
+    async def _handle_profile_pipeline_status(self, _request):
+        return self._json_response(await self._profile_pipeline_status_payload())
+
+    async def _handle_profile_pipeline_wake(self, _request):
+        if self.profile_pipeline is None:
+            return self._json_response(
+                {
+                    "error": "profile_pipeline_unavailable",
+                    "status": await self._profile_pipeline_status_payload(),
+                },
+                status=503,
+            )
+        runtime = self.profile_pipeline.get_runtime_status()
+        if runtime.get("mode") != "astrbot_llm":
+            return self._json_response(
+                {
+                    "error": "profile_pipeline_not_llm_mode",
+                    "message": "profile_pipeline_mode must be astrbot_llm to run portrait extraction",
+                    "status": await self._profile_pipeline_status_payload(),
+                },
+                status=409,
+            )
+        runtime = await self.profile_pipeline.trigger_once()
+        return self._json_response(
+            {
+                "triggered": True,
+                "runtime": runtime,
+                "storage": await self.db.get_profile_pipeline_status(),
+            }
+        )
+
+    async def _handle_profile_pipeline_reset(self, request):
+        clear_claims = request.query.get("clear_claims", "1").strip() != "0"
+        if self.profile_pipeline is not None:
+            runtime = self.profile_pipeline.get_runtime_status()
+            if runtime.get("mode") != "astrbot_llm":
+                return self._json_response(
+                    {
+                        "error": "profile_pipeline_not_llm_mode",
+                        "message": "profile_pipeline_mode must be astrbot_llm before resetting and rerunning portrait extraction",
+                        "status": await self._profile_pipeline_status_payload(),
+                    },
+                    status=409,
+                )
+        reset_counts = await self.db.reset_profile_pipeline(clear_claims=clear_claims)
+        runtime = None
+        if self.profile_pipeline is not None:
+            runtime = await self.profile_pipeline.trigger_once()
+        return self._json_response(
+            {
+                "reset": True,
+                "clear_claims": clear_claims,
+                "deleted_counts": reset_counts,
+                "runtime": runtime,
+                "storage": await self.db.get_profile_pipeline_status(),
+            }
+        )
+
+    async def _profile_pipeline_status_payload(self):
+        runtime = None
+        if self.profile_pipeline is not None:
+            runtime = self.profile_pipeline.get_runtime_status()
+        return {
+            "runtime": runtime,
+            "storage": await self.db.get_profile_pipeline_status(),
+        }
 
     async def _handle_groups(self, request):
         search = request.query.get("search", "")

@@ -9,7 +9,7 @@ SQLite database.
 - Mark recalled messages when `group_recall` notice events arrive
 - Record message emoji reactions from `group_msg_emoji_like`
 - Provide a built-in WebUI for browsing groups, messages, notices, attachments,
-  forward nodes, and raw payloads
+  forward nodes, profile attributes, claim evidence, and raw payloads
 - Maintain a profile layer for user, group-user, daily, and interaction summaries
 - Persist media files into the plugin data directory
 - Keep raw OneBot payloads for unsupported segments such as `mface`
@@ -52,7 +52,7 @@ The WebUI can:
 
 - Search and select archived groups
 - Browse paged message and notice timelines
-- Browse per-group member profiles and interaction summaries
+- Browse per-group member profiles, current attributes, recent claims, and evidence backlinks
 - Inspect full message segment details
 - View recall / emoji reaction raw notice payloads
 - Open locally persisted images and files
@@ -101,12 +101,17 @@ Profile-pipeline fields:
 - `profile_pipeline_min_batch_messages`: minimum unseen messages before a batch is created
 - `profile_pipeline_batch_overlap`: repeated context between neighboring batches
 - `profile_pipeline_max_jobs_per_tick`: max profile jobs handled in one poll round
-- `profile_pipeline_provider_id` / `profile_pipeline_model`: shared AstrBot provider ID and model name
-- `profile_pipeline_judge_provider_id` / `profile_pipeline_judge_model`: optional stage override
-- `profile_pipeline_extract_provider_id` / `profile_pipeline_extract_model`: optional stage override
-- `profile_pipeline_resolve_provider_id` / `profile_pipeline_resolve_model`: optional stage override
+- `profile_pipeline_provider_id`: shared AstrBot provider ID
+- `profile_pipeline_judge_provider_id`: optional judge-stage provider override
+- `profile_pipeline_extract_provider_id`: optional extract-stage provider override
+- `profile_pipeline_resolve_provider_id`: optional resolve-stage provider override
 - `profile_pipeline_extract_include_images`: send archived images to multimodal extraction calls
 - `profile_pipeline_extract_max_images`: cap image count per extraction request
+
+`*_provider_id` fields use AstrBot plugin-config `_special: select_provider`, so the
+WebUI can directly show already configured chat providers for selection. In this
+plugin, selecting a provider is the model-selection mechanism, because each
+AstrBot provider entry already carries its own model configuration.
 
 ## Commands
 
@@ -191,7 +196,7 @@ Current modes:
   depending on an external LLM provider.
 - `astrbot_llm`
   Calls AstrBot's native `Context.llm_generate(...)` interface and lets you pick
-  provider IDs / model names directly from plugin config.
+  provider IDs directly from plugin config.
 - `noop`
   Keeps the workflow structure but does not emit claims.
 
@@ -252,6 +257,20 @@ Typical `archived_notice_events` row:
 ```
 
 ## Development
+
+WebUI source is now maintained as a small SPA:
+
+- `frontend/`: Vite + Preact + TypeScript source
+- `src/webui_assets/`: built static assets served by `aiohttp`
+
+Useful commands:
+
+- `npm install`
+- `npm run build`
+- `npm run dev`
+
+`npm run build` writes production assets into `src/webui_assets/`, which the
+plugin serves at runtime through `/` and `/assets/*`.
 
 Basic validation commands:
 

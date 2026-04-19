@@ -20,20 +20,18 @@ class PluginSettings:
     webui_port: int = 18766
     webui_auth_token: str = ""
     profile_pipeline_enabled: bool = False
-    profile_pipeline_mode: str = "heuristic"
+    profile_pipeline_mode: str = "astrbot_llm"
     profile_pipeline_poll_interval_sec: int = 30
     profile_pipeline_batch_message_limit: int = 40
     profile_pipeline_min_batch_messages: int = 12
     profile_pipeline_batch_overlap: int = 8
     profile_pipeline_max_jobs_per_tick: int = 2
+    profile_pipeline_llm_timeout_sec: int = 300
+    profile_pipeline_running_job_timeout_sec: int = 1800
     profile_pipeline_provider_id: str = ""
-    profile_pipeline_model: str = ""
     profile_pipeline_judge_provider_id: str = ""
-    profile_pipeline_judge_model: str = ""
     profile_pipeline_extract_provider_id: str = ""
-    profile_pipeline_extract_model: str = ""
     profile_pipeline_resolve_provider_id: str = ""
-    profile_pipeline_resolve_model: str = ""
     profile_pipeline_extract_include_images: bool = True
     profile_pipeline_extract_max_images: int = 4
 
@@ -67,9 +65,9 @@ class PluginSettings:
                 values.get("profile_pipeline_enabled", False)
             ),
             profile_pipeline_mode=str(
-                values.get("profile_pipeline_mode", "heuristic")
+                values.get("profile_pipeline_mode", "astrbot_llm")
             ).strip().lower()
-            or "heuristic",
+            or "astrbot_llm",
             profile_pipeline_poll_interval_sec=max(
                 int(values.get("profile_pipeline_poll_interval_sec", 30) or 30), 5
             ),
@@ -85,29 +83,27 @@ class PluginSettings:
             profile_pipeline_max_jobs_per_tick=max(
                 int(values.get("profile_pipeline_max_jobs_per_tick", 2) or 2), 1
             ),
+            profile_pipeline_llm_timeout_sec=max(
+                int(values.get("profile_pipeline_llm_timeout_sec", 300) or 300), 30
+            ),
+            profile_pipeline_running_job_timeout_sec=max(
+                int(
+                    values.get("profile_pipeline_running_job_timeout_sec", 1800)
+                    or 1800
+                ),
+                60,
+            ),
             profile_pipeline_provider_id=str(
                 values.get("profile_pipeline_provider_id", "")
-            ).strip(),
-            profile_pipeline_model=str(
-                values.get("profile_pipeline_model", "")
             ).strip(),
             profile_pipeline_judge_provider_id=str(
                 values.get("profile_pipeline_judge_provider_id", "")
             ).strip(),
-            profile_pipeline_judge_model=str(
-                values.get("profile_pipeline_judge_model", "")
-            ).strip(),
             profile_pipeline_extract_provider_id=str(
                 values.get("profile_pipeline_extract_provider_id", "")
             ).strip(),
-            profile_pipeline_extract_model=str(
-                values.get("profile_pipeline_extract_model", "")
-            ).strip(),
             profile_pipeline_resolve_provider_id=str(
                 values.get("profile_pipeline_resolve_provider_id", "")
-            ).strip(),
-            profile_pipeline_resolve_model=str(
-                values.get("profile_pipeline_resolve_model", "")
             ).strip(),
             profile_pipeline_extract_include_images=bool(
                 values.get("profile_pipeline_extract_include_images", True)
@@ -159,13 +155,3 @@ class PluginSettings:
         if stage_name == "resolve" and self.profile_pipeline_resolve_provider_id:
             return self.profile_pipeline_resolve_provider_id
         return self.profile_pipeline_provider_id
-
-    def get_profile_stage_model(self, stage: str) -> str:
-        stage_name = str(stage or "").strip().lower()
-        if stage_name == "judge" and self.profile_pipeline_judge_model:
-            return self.profile_pipeline_judge_model
-        if stage_name == "extract" and self.profile_pipeline_extract_model:
-            return self.profile_pipeline_extract_model
-        if stage_name == "resolve" and self.profile_pipeline_resolve_model:
-            return self.profile_pipeline_resolve_model
-        return self.profile_pipeline_model

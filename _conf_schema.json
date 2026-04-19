@@ -1,187 +1,185 @@
 {
   "enabled": {
     "type": "bool",
-    "description": "Enable archive collection",
+    "description": "启用归档功能",
     "default": true,
-    "hint": "Disable this to stop writing new QQ group events into the plugin database."
+    "hint": "关闭后将停止把新的 QQ 群聊事件写入插件数据库。"
   },
   "group_list_mode": {
     "type": "string",
-    "description": "Group list mode",
+    "description": "群列表模式",
     "options": ["whitelist", "blacklist"],
     "default": "whitelist",
-    "hint": "whitelist: only archive listed groups. blacklist: archive every QQ group except the listed ones."
+    "hint": "whitelist：只归档列表中的群。blacklist：归档除列表外的所有群。"
   },
   "group_list": {
     "type": "list",
-    "description": "Target QQ groups",
+    "description": "目标 QQ 群",
     "default": [],
-    "hint": "Each item can be a plain group id like 123456, a full unified session id like onebot:GroupMessage:123456, or platform_id:group_id.",
+    "hint": "每项可以填纯群号，如 123456；也可以填完整会话 ID，如 onebot:GroupMessage:123456；或者填 platform_id:group_id。",
     "items": {
       "type": "string"
     }
   },
   "save_raw_event": {
     "type": "bool",
-    "description": "Persist raw OneBot event payload",
+    "description": "保存原始 OneBot 事件",
     "default": true,
-    "hint": "Recommended. This keeps unsupported QQ segment types such as mface recoverable from the raw payload."
+    "hint": "建议开启。这样像 mface 这类未完全标准化的 QQ 消息段仍然能从原始 payload 中恢复。"
   },
   "save_media_files": {
     "type": "bool",
-    "description": "Persist media files locally",
+    "description": "保存媒体文件到本地",
     "default": true,
-    "hint": "When enabled, images, voice, video, and files are copied into the plugin media directory."
+    "hint": "开启后，图片、语音、视频和文件会复制到插件自己的媒体目录。"
   },
   "max_media_size_mb": {
     "type": "int",
-    "description": "Per-file media size limit in MB",
+    "description": "单个媒体文件大小上限（MB）",
     "default": 30,
-    "hint": "Files larger than this limit are recorded as metadata only and will not be copied into plugin storage."
+    "hint": "超过该大小的文件只记录元数据，不复制实体文件到插件存储中。"
   },
   "expand_forward_messages": {
     "type": "bool",
-    "description": "Resolve forward message nodes with get_forward_msg",
+    "description": "展开转发消息节点",
     "default": true,
-    "hint": "The outer forward segment is always archived. This option additionally fetches and stores the forwarded node contents when the OneBot implementation supports it."
+    "hint": "外层 forward 段一定会归档；开启后，在 OneBot 实现支持的情况下，还会调用 get_forward_msg 拉取并保存转发节点内容。"
   },
   "record_all_notice_events": {
     "type": "bool",
-    "description": "Record all QQ group notice events",
+    "description": "记录全部 QQ 群通知事件",
     "default": true,
-    "hint": "If disabled, the plugin still records recalls and message emoji reactions because they are core archive events."
+    "hint": "关闭后，插件仍会记录撤回和点表情回应，因为它们属于核心归档事件。"
   },
   "capture_outgoing_messages": {
     "type": "bool",
-    "description": "Archive bot messages after they are sent",
+    "description": "归档机器人发出的消息",
     "default": true,
-    "hint": "Outgoing messages are archived without a platform message id because AstrBot does not expose it at this hook point."
+    "hint": "机器人发出的消息会被归档，但在这个 hook 阶段 AstrBot 不会暴露平台最终消息 ID。"
   },
   "webui_enabled": {
     "type": "bool",
-    "description": "Enable archive WebUI",
+    "description": "启用归档 WebUI",
     "default": true,
-    "hint": "Starts a small local HTTP server for browsing archived groups, messages, notices, and raw payloads."
+    "hint": "开启后会启动一个小型 HTTP 服务，用于浏览已归档的群聊、消息、通知和原始 payload。"
   },
   "webui_host": {
     "type": "string",
-    "description": "WebUI bind host",
+    "description": "WebUI 监听地址",
     "default": "127.0.0.1",
-    "hint": "Use 127.0.0.1 for local-only access. Use 0.0.0.0 only when you really need remote access."
+    "hint": "本机访问建议填 127.0.0.1。只有确实需要远程访问时才建议改成 0.0.0.0。"
   },
   "webui_port": {
     "type": "int",
-    "description": "WebUI bind port",
+    "description": "WebUI 端口",
     "default": 18766,
-    "hint": "Port used by the archive WebUI."
+    "hint": "归档 WebUI 使用的监听端口。"
   },
   "webui_auth_token": {
     "type": "string",
-    "description": "WebUI auth token",
+    "description": "WebUI 访问令牌",
     "default": "",
-    "hint": "Optional bearer-like token for the WebUI API. When empty, the WebUI is open to whoever can reach the port."
+    "hint": "可选的 WebUI API 访问令牌。为空时，任何能连到该端口的人都可以访问。"
   },
   "profile_pipeline_enabled": {
     "type": "bool",
-    "description": "Enable LangGraph profile pipeline",
+    "description": "启用画像流水线",
     "default": false,
-    "hint": "Builds message batches from archived group chats, runs a fixed judge/extract/resolve workflow, and writes claim/attribute tables back into archive.db."
+    "hint": "开启后，会从已归档群聊中切分消息批次，运行固定的 judge/extract/resolve 流程，并把 claim 与 attribute 写回 archive.db。"
   },
   "profile_pipeline_mode": {
     "type": "string",
-    "description": "Profile pipeline model mode",
+    "description": "画像流水线模式",
     "options": ["heuristic", "astrbot_llm", "noop"],
-    "default": "heuristic",
-    "hint": "heuristic uses built-in keyword and regex extraction to validate the LangGraph workflow. astrbot_llm uses AstrBot's native llm_generate interface with provider/model IDs from this plugin config. noop keeps the pipeline structure but does not emit claims."
+    "default": "astrbot_llm",
+    "hint": "astrbot_llm：通过 AstrBot 原生 llm_generate 接口做开放式画像抽取。heuristic：只验证流水线是否能跑，不会产生画像 claim。noop：保留流程骨架但不产生画像结果。"
   },
   "profile_pipeline_poll_interval_sec": {
     "type": "int",
-    "description": "Profile pipeline poll interval in seconds",
+    "description": "画像流水线轮询间隔（秒）",
     "default": 30,
-    "hint": "How often the background runner checks for new message batches and pending extraction jobs."
+    "hint": "后台 runner 检查新消息批次和待处理任务的间隔时间。"
   },
   "profile_pipeline_batch_message_limit": {
     "type": "int",
-    "description": "Messages per profile batch",
+    "description": "每个画像批次的消息数上限",
     "default": 40,
-    "hint": "Upper bound of incoming group messages bundled into one LangGraph block before judge/extract runs."
+    "hint": "一批消息最多包含多少条入站群消息，超过后会切成新的 LangGraph block。"
   },
   "profile_pipeline_min_batch_messages": {
     "type": "int",
-    "description": "Minimum messages required to create a batch",
+    "description": "创建批次所需的最少消息数",
     "default": 12,
-    "hint": "If a group has fewer than this many unseen incoming messages, the pipeline waits for more before creating a block."
+    "hint": "如果一个群未处理的新消息不足这个数量，流水线会继续等待更多消息后再建批次。"
   },
   "profile_pipeline_batch_overlap": {
     "type": "int",
-    "description": "Batch overlap message count",
+    "description": "批次重叠消息数",
     "default": 8,
-    "hint": "Messages repeated between neighboring blocks so the judge can still see context that spans across long conversations."
+    "hint": "相邻批次之间重复保留多少条消息，用来覆盖跨长对话的上下文。"
   },
   "profile_pipeline_max_jobs_per_tick": {
     "type": "int",
-    "description": "Maximum profile jobs per poll cycle",
+    "description": "每轮最多处理的画像任务数",
     "default": 2,
-    "hint": "Controls how many LangGraph jobs the background runner executes in one polling round."
+    "hint": "控制后台 runner 每次轮询最多执行多少个 LangGraph 任务。"
+  },
+  "profile_pipeline_llm_timeout_sec": {
+    "type": "int",
+    "description": "单次模型调用超时（秒）",
+    "default": 300,
+    "hint": "judge、extract、resolve 中任意一次 AstrBot LLM 调用超过这个时间会失败并释放当前 job，避免流水线一直卡在 running。"
+  },
+  "profile_pipeline_running_job_timeout_sec": {
+    "type": "int",
+    "description": "运行中任务自动恢复时间（秒）",
+    "default": 1800,
+    "hint": "如果数据库里存在运行超过该时间的 running job，会标记为 failed 并允许下轮重新执行。插件启动时也会自动恢复上次遗留的 running job。"
   },
   "profile_pipeline_provider_id": {
     "type": "string",
-    "description": "Shared profile pipeline provider ID",
+    "description": "画像流水线默认 Provider",
     "default": "",
-    "hint": "AstrBot provider ID used by all profile stages when a stage-specific provider ID is empty. Leave blank to fall back to AstrBot's current default chat provider."
-  },
-  "profile_pipeline_model": {
-    "type": "string",
-    "description": "Shared profile pipeline model name",
-    "default": "",
-    "hint": "Optional default model name for all profile stages. Leave blank to use the provider's current model."
+    "_special": "select_provider",
+    "hint": "所有画像阶段共用的 Provider。留空时回退到 AstrBot 当前默认对话 Provider。"
   },
   "profile_pipeline_judge_provider_id": {
     "type": "string",
-    "description": "Judge-stage provider ID",
+    "description": "候选判断阶段 Provider",
     "default": "",
-    "hint": "Optional AstrBot provider ID for the batch judge stage."
-  },
-  "profile_pipeline_judge_model": {
-    "type": "string",
-    "description": "Judge-stage model name",
-    "default": "",
-    "hint": "Optional model name for the judge stage."
+    "_special": "select_provider",
+    "hint": "批次候选判断阶段专用 Provider。留空则使用默认 Provider。"
   },
   "profile_pipeline_extract_provider_id": {
     "type": "string",
-    "description": "Extract-stage provider ID",
+    "description": "事实提取阶段 Provider",
     "default": "",
-    "hint": "Optional AstrBot provider ID for the structured claim extraction stage."
-  },
-  "profile_pipeline_extract_model": {
-    "type": "string",
-    "description": "Extract-stage model name",
-    "default": "",
-    "hint": "Optional model name for the extraction stage."
+    "_special": "select_provider",
+    "hint": "结构化 claim 提取阶段专用 Provider。留空则使用默认 Provider。"
   },
   "profile_pipeline_resolve_provider_id": {
     "type": "string",
-    "description": "Resolve-stage provider ID",
+    "description": "合并消歧阶段 Provider",
     "default": "",
-    "hint": "Optional AstrBot provider ID for the semantic dedupe and conflict-resolution stage."
-  },
-  "profile_pipeline_resolve_model": {
-    "type": "string",
-    "description": "Resolve-stage model name",
-    "default": "",
-    "hint": "Optional model name for the resolver stage."
+    "_special": "select_provider",
+    "hint": "语义去重、合并和冲突消解阶段专用 Provider。留空则使用默认 Provider。"
   },
   "profile_pipeline_extract_include_images": {
     "type": "bool",
-    "description": "Include archived images in extract stage",
+    "description": "提取阶段附带图片",
     "default": true,
-    "hint": "When enabled, the extraction stage sends stored or source image URLs to a multimodal model through AstrBot's llm_generate interface."
+    "condition": {
+      "profile_pipeline_mode": "astrbot_llm"
+    },
+    "hint": "开启后，提取阶段会把已保存的图片路径或原始图片 URL 一并发送给多模态模型。"
   },
   "profile_pipeline_extract_max_images": {
     "type": "int",
-    "description": "Maximum images per extract call",
+    "description": "每次提取最多附带图片数",
     "default": 4,
-    "hint": "Upper bound of archived images attached to one extraction request."
+    "condition": {
+      "profile_pipeline_mode": "astrbot_llm"
+    },
+    "hint": "每次结构化提取请求最多附带多少张图片。"
   }
 }

@@ -1,0 +1,17 @@
+{
+  "name": "astrbot-plugin-qq-group-archive-webui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite --host 0.0.0.0"
+  },
+  "dependencies": {
+    "preact": "^10.26.6"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.10"
+  }
+}

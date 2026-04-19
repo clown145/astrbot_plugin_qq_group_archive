@@ -49,6 +49,7 @@ class CandidateSpan:
 class ExtractedClaim:
     subject_user_id: str
     attribute_type: str
+    attribute_label: str
     raw_value: str
     normalized_value: str
     source_kind: str = "unknown"
@@ -63,6 +64,7 @@ class ExtractedClaim:
         return {
             "subject_user_id": self.subject_user_id,
             "attribute_type": self.attribute_type,
+            "attribute_label": self.attribute_label,
             "raw_value": self.raw_value,
             "normalized_value": self.normalized_value,
             "source_kind": self.source_kind,
@@ -82,6 +84,7 @@ class ExtractedClaim:
         return cls(
             subject_user_id=str(values.get("subject_user_id", "") or "").strip(),
             attribute_type=str(values.get("attribute_type", "") or "").strip(),
+            attribute_label=str(values.get("attribute_label", "") or "").strip(),
             raw_value=str(values.get("raw_value", "") or ""),
             normalized_value=str(values.get("normalized_value", "") or ""),
             source_kind=str(values.get("source_kind", "unknown") or "unknown"),
@@ -102,6 +105,7 @@ class ExtractedClaim:
 class ResolvedClaim:
     subject_user_id: str
     attribute_type: str
+    attribute_label: str
     raw_value: str
     normalized_value: str
     source_kind: str = "unknown"
@@ -121,6 +125,7 @@ class ResolvedClaim:
         return {
             "subject_user_id": self.subject_user_id,
             "attribute_type": self.attribute_type,
+            "attribute_label": self.attribute_label,
             "raw_value": self.raw_value,
             "normalized_value": self.normalized_value,
             "source_kind": self.source_kind,
@@ -147,6 +152,7 @@ class ResolvedClaim:
         return cls(
             subject_user_id=str(values.get("subject_user_id", "") or "").strip(),
             attribute_type=str(values.get("attribute_type", "") or "").strip(),
+            attribute_label=str(values.get("attribute_label", "") or "").strip(),
             raw_value=str(values.get("raw_value", "") or ""),
             normalized_value=str(values.get("normalized_value", "") or ""),
             source_kind=str(values.get("source_kind", "unknown") or "unknown"),
@@ -177,6 +183,67 @@ class ResolvedClaim:
 
 
 @dataclass(slots=True)
+class ResolutionAction:
+    action_type: str
+    subject_user_id: str = ""
+    from_attribute_type: str = ""
+    to_attribute_type: str = ""
+    attribute_label: str = ""
+    claim_ids: list[int] = field(default_factory=list)
+    status: str = ""
+    reason: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.action_type,
+            "subject_user_id": self.subject_user_id,
+            "from_attribute_type": self.from_attribute_type,
+            "to_attribute_type": self.to_attribute_type,
+            "attribute_label": self.attribute_label,
+            "claim_ids": [int(value) for value in self.claim_ids],
+            "status": self.status,
+            "reason": self.reason,
+            "payload": dict(self.payload),
+        }
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, Any] | None) -> "ResolutionAction":
+        values = dict(payload or {})
+        raw_claim_ids = values.get("claim_ids", []) or []
+        if isinstance(raw_claim_ids, (str, int)):
+            raw_claim_ids = [raw_claim_ids]
+        return cls(
+            action_type=str(
+                values.get("type")
+                or values.get("action_type")
+                or ""
+            ).strip(),
+            subject_user_id=str(values.get("subject_user_id", "") or "").strip(),
+            from_attribute_type=str(
+                values.get("from_attribute_type")
+                or values.get("source_attribute_type")
+                or values.get("attribute_type")
+                or ""
+            ).strip(),
+            to_attribute_type=str(
+                values.get("to_attribute_type")
+                or values.get("target_attribute_type")
+                or ""
+            ).strip(),
+            attribute_label=str(values.get("attribute_label", "") or "").strip(),
+            claim_ids=[
+                int(value)
+                for value in raw_claim_ids
+                if str(value).strip()
+            ],
+            status=str(values.get("status", "") or "").strip(),
+            reason=str(values.get("reason", "") or "").strip(),
+            payload=dict(values.get("payload", {}) or {}),
+        )
+
+
+@dataclass(slots=True)
 class JudgeResult:
     candidate_spans: list[CandidateSpan] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
@@ -191,10 +258,12 @@ class JudgeResult:
 @dataclass(slots=True)
 class ResolutionResult:
     resolved_claims: list[ResolvedClaim] = field(default_factory=list)
+    actions: list[ResolutionAction] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "resolved_claims": [item.to_dict() for item in self.resolved_claims],
+            "actions": [item.to_dict() for item in self.actions],
             "summary": dict(self.summary),
         }

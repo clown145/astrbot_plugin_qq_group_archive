@@ -31,6 +31,7 @@ class ProfileWorkflowState(TypedDict, total=False):
     extracted_claims: list[dict[str, Any]]
     resolution_context: dict[str, Any]
     resolved_claims: list[dict[str, Any]]
+    resolution_actions: list[dict[str, Any]]
     summary: dict[str, Any]
 
 
@@ -54,6 +55,25 @@ class ProfilePipelineService:
     def is_supported(self) -> bool:
         return bool(LANGGRAPH_AVAILABLE and self._graph is not None)
 
+    def get_runtime_status(self) -> dict[str, Any]:
+        settings = PluginSettings.from_mapping(self.config)
+        return {
+            "enabled": settings.profile_pipeline_enabled,
+            "mode": settings.profile_pipeline_mode,
+            "langgraph_available": LANGGRAPH_AVAILABLE,
+            "supported": self.is_supported,
+            "runner_running": self._runner_task is not None
+            and not self._runner_task.done(),
+            "llm_mode": self._llm_mode,
+            "poll_interval_sec": settings.profile_pipeline_poll_interval_sec,
+            "batch_message_limit": settings.profile_pipeline_batch_message_limit,
+            "min_batch_messages": settings.profile_pipeline_min_batch_messages,
+            "batch_overlap": settings.profile_pipeline_batch_overlap,
+            "max_jobs_per_tick": settings.profile_pipeline_max_jobs_per_tick,
+            "llm_timeout_sec": settings.profile_pipeline_llm_timeout_sec,
+            "running_job_timeout_sec": settings.profile_pipeline_running_job_timeout_sec,
+        }
+
     async def start(self):
         settings = PluginSettings.from_mapping(self.config)
         if not settings.profile_pipeline_enabled:
@@ -66,6 +86,15 @@ class ProfilePipelineService:
             return
         self._ensure_llm(settings)
         if self._runner_task is None or self._runner_task.done():
+            recovered = await self.db.recover_stale_profile_jobs(
+                timeout_sec=settings.profile_pipeline_running_job_timeout_sec,
+                force=True,
+            )
+            if recovered:
+                logger.warning(
+                    "qq_group_archive recovered %s running profile jobs on startup",
+                    recovered,
+                )
             self._runner_task = asyncio.create_task(self._run_loop())
             logger.info(
                 "qq_group_archive profile pipeline started in %s mode",
@@ -84,6 +113,11 @@ class ProfilePipelineService:
 
     async def wake(self):
         self._wake_event.set()
+
+    async def trigger_once(self) -> dict[str, Any]:
+        await self.start()
+        await self.wake()
+        return self.get_runtime_status()
 
     async def _run_loop(self):
         while True:
@@ -106,6 +140,16 @@ class ProfilePipelineService:
             self._wake_event.clear()
 
     async def _tick(self, settings: PluginSettings):
+        recovered = await self.db.recover_stale_profile_jobs(
+            timeout_sec=settings.profile_pipeline_running_job_timeout_sec,
+            force=False,
+        )
+        if recovered:
+            logger.warning(
+                "qq_group_archive recovered %s stale running profile jobs",
+                recovered,
+            )
+
         await self.db.create_profile_message_blocks(
             batch_message_limit=settings.profile_pipeline_batch_message_limit,
             min_batch_messages=min(
@@ -179,6 +223,11 @@ class ProfilePipelineService:
         return builder.compile()
 
     async def _load_job(self, state: ProfileWorkflowState) -> ProfileWorkflowState:
+        await self._mark_progress(
+            int(state["job_id"]),
+            "load_job",
+            "读取任务上下文",
+        )
         context = await self.db.get_profile_job_context(int(state["job_id"]))
         if context is None:
             raise RuntimeError(f"profile job {state['job_id']} not found")
@@ -203,9 +252,25 @@ class ProfilePipelineService:
         assert self.llm_client is not None
         block = dict(state.get("block") or {})
         block["messages"] = list(state.get("messages") or [])
+        await self._mark_progress(
+            int(state["job_id"]),
+            "judge_block",
+            "调用候选判断模型",
+            state=state,
+        )
         result: JudgeResult = await self.llm_client.judge_block(block)
         summary = dict(state.get("summary") or {})
         summary["judge"] = result.summary
+        await self._mark_progress(
+            int(state["job_id"]),
+            "judge_done",
+            f"候选片段 {len(result.candidate_spans)} 个",
+            state={
+                **state,
+                "candidate_spans": [item.to_dict() for item in result.candidate_spans],
+                "summary": summary,
+            },
+        )
         return {
             "candidate_spans": [item.to_dict() for item in result.candidate_spans],
             "summary": summary,
@@ -221,10 +286,25 @@ class ProfilePipelineService:
         block = dict(state.get("block") or {})
         block["messages"] = list(state.get("messages") or [])
         claims: list[dict[str, Any]] = []
-        for span_payload in state.get("candidate_spans", []) or []:
+        spans = list(state.get("candidate_spans", []) or [])
+        for index, span_payload in enumerate(spans, start=1):
             span = CandidateSpan.from_mapping(span_payload)
+            await self._mark_progress(
+                int(state["job_id"]),
+                "extract_claims",
+                f"抽取候选片段 {index}/{len(spans)}",
+                state={**state, "extracted_claims": claims},
+                extra={"current_span": span.to_dict()},
+            )
             extracted = await self.llm_client.extract_claims(block, span)
             claims.extend([item.to_dict() for item in extracted])
+            await self._mark_progress(
+                int(state["job_id"]),
+                "extract_claims",
+                f"已抽取 {index}/{len(spans)}，累计 claim {len(claims)} 条",
+                state={**state, "extracted_claims": claims},
+                extra={"current_span": span.to_dict()},
+            )
 
         summary = dict(state.get("summary") or {})
         summary["extract"] = {
@@ -247,6 +327,12 @@ class ProfilePipelineService:
         )
         block = dict(state.get("block") or {})
         block["messages"] = list(state.get("messages") or [])
+        await self._mark_progress(
+            int(state["job_id"]),
+            "resolve_claims",
+            f"合并消歧 {len(extracted_claims)} 条 claim",
+            state=state,
+        )
         resolution_context = await self.db.get_profile_resolution_context(
             platform_id=str(block.get("platform_id") or ""),
             group_id=str(block.get("group_id") or ""),
@@ -260,26 +346,47 @@ class ProfilePipelineService:
         )
         summary = dict(state.get("summary") or {})
         summary["resolve"] = result.summary
+        await self._mark_progress(
+            int(state["job_id"]),
+            "resolve_done",
+            f"消解结果 {len(result.resolved_claims)} 条，整理动作 {len(result.actions)} 个",
+            state={
+                **state,
+                "resolution_context": resolution_context,
+                "resolved_claims": [item.to_dict() for item in result.resolved_claims],
+                "resolution_actions": [item.to_dict() for item in result.actions],
+                "summary": summary,
+            },
+        )
         return {
             "resolution_context": resolution_context,
             "resolved_claims": [item.to_dict() for item in result.resolved_claims],
+            "resolution_actions": [item.to_dict() for item in result.actions],
             "summary": summary,
         }
 
     async def _persist_claims(self, state: ProfileWorkflowState) -> ProfileWorkflowState:
         summary = dict(state.get("summary") or {})
+        await self._mark_progress(
+            int(state["job_id"]),
+            "persist_claims",
+            f"写入 {len(state.get('resolved_claims') or [])} 条结果",
+            state=state,
+        )
         persist_result = await self.db.apply_profile_resolution(
             job_id=int(state["job_id"]),
             resolved_claims=list(state.get("resolved_claims") or []),
+            resolution_actions=list(state.get("resolution_actions") or []),
             summary=summary,
             workflow_state=self._workflow_state_payload(state),
             block_messages=list(state.get("messages") or []),
         )
         logger.info(
-            "qq_group_archive profile job %s completed with %s claims / %s attributes",
+            "qq_group_archive profile job %s completed with %s claims / %s attributes / %s actions",
             state["job_id"],
             persist_result.get("inserted_claims"),
             persist_result.get("updated_attributes"),
+            persist_result.get("actions_applied"),
         )
         return {}
 
@@ -289,6 +396,12 @@ class ProfilePipelineService:
     ) -> ProfileWorkflowState:
         summary = dict(state.get("summary") or {})
         summary["extract"] = {"candidate_count": 0, "claim_count": 0}
+        await self._mark_progress(
+            int(state["job_id"]),
+            "persist_without_claims",
+            "没有候选片段，直接完成",
+            state={**state, "summary": summary},
+        )
         await self.db.complete_profile_job(
             job_id=int(state["job_id"]),
             summary=summary,
@@ -296,11 +409,41 @@ class ProfilePipelineService:
         )
         return {}
 
+    async def _mark_progress(
+        self,
+        job_id: int,
+        stage: str,
+        detail: str = "",
+        *,
+        state: ProfileWorkflowState | dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ):
+        payload = self._progress_state_payload(state or {})
+        if extra:
+            payload.update(extra)
+        await self.db.update_profile_job_progress(
+            job_id=int(job_id),
+            stage=stage,
+            stage_detail=detail,
+            workflow_state=payload,
+        )
+
     @staticmethod
     def _workflow_state_payload(state: ProfileWorkflowState) -> dict[str, Any]:
         return {
             "candidate_spans": list(state.get("candidate_spans") or []),
             "extracted_claims": list(state.get("extracted_claims") or []),
             "resolved_claims": list(state.get("resolved_claims") or []),
+            "resolution_actions": list(state.get("resolution_actions") or []),
+            "summary": dict(state.get("summary") or {}),
+        }
+
+    @staticmethod
+    def _progress_state_payload(state: ProfileWorkflowState | dict[str, Any]) -> dict[str, Any]:
+        return {
+            "candidate_count": len(state.get("candidate_spans") or []),
+            "extracted_claim_count": len(state.get("extracted_claims") or []),
+            "resolved_claim_count": len(state.get("resolved_claims") or []),
+            "resolution_action_count": len(state.get("resolution_actions") or []),
             "summary": dict(state.get("summary") or {}),
         }

@@ -91,6 +91,7 @@ class QQGroupArchivePlugin(Star):
                 host=settings.webui_host,
                 port=settings.webui_port,
                 auth_token=settings.webui_auth_token,
+                profile_pipeline=self.profile_pipeline,
             )
         if not self.webui.is_supported:
             logger.warning(

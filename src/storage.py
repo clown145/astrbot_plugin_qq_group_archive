@@ -601,12 +601,34 @@ class ArchiveDatabase:
             """,
             (),
         )
+        profile_claims = await self._fetch_value(
+            """
+            SELECT COUNT(*) FROM profile_claims
+            """,
+            (),
+        )
+        profile_attributes = await self._fetch_value(
+            """
+            SELECT COUNT(*) FROM profile_attributes
+            """,
+            (),
+        )
+        profile_jobs_completed = await self._fetch_value(
+            """
+            SELECT COUNT(*) FROM profile_extraction_jobs WHERE status = 'completed'
+            """,
+            (),
+        )
         last_message_time = await self._fetch_value(
             "SELECT COALESCE(MAX(event_time), 0) FROM archived_messages",
             (),
         )
         last_notice_time = await self._fetch_value(
             "SELECT COALESCE(MAX(event_time), 0) FROM archived_notice_events",
+            (),
+        )
+        last_profile_update_time = await self._fetch_value(
+            "SELECT COALESCE(MAX(updated_at), 0) FROM profile_claims",
             (),
         )
 
@@ -621,9 +643,198 @@ class ArchiveDatabase:
             "profile_users": profile_users,
             "profile_group_users": profile_group_users,
             "interaction_edges": interaction_edges,
+            "profile_claims": profile_claims,
+            "profile_attributes": profile_attributes,
+            "profile_jobs_completed": profile_jobs_completed,
             "last_event_time": max(last_message_time, last_notice_time) or None,
+            "last_profile_update_time": last_profile_update_time or None,
             "db_path": str(self.db_path),
         }
+
+    async def get_profile_pipeline_status(self) -> dict[str, object]:
+        await self.initialize()
+        assert self._conn is not None
+
+        archived_incoming_messages = await self._fetch_value(
+            """
+            SELECT COUNT(*) FROM archived_messages WHERE direction = 'incoming'
+            """,
+            (),
+        )
+        archived_groups = await self._fetch_value(
+            """
+            SELECT COUNT(*)
+            FROM (
+                SELECT platform_id, group_id
+                FROM archived_messages
+                WHERE direction = 'incoming'
+                GROUP BY platform_id, group_id
+            )
+            """,
+            (),
+        )
+        total_blocks = await self._fetch_value(
+            "SELECT COUNT(*) FROM profile_message_blocks",
+            (),
+        )
+        total_jobs = await self._fetch_value(
+            "SELECT COUNT(*) FROM profile_extraction_jobs",
+            (),
+        )
+        total_claims = await self._fetch_value(
+            "SELECT COUNT(*) FROM profile_claims",
+            (),
+        )
+        total_attributes = await self._fetch_value(
+            "SELECT COUNT(*) FROM profile_attributes",
+            (),
+        )
+        block_status_rows = await self._fetchall(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM profile_message_blocks
+            GROUP BY status
+            ORDER BY status ASC
+            """,
+            (),
+        )
+        job_status_rows = await self._fetchall(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM profile_extraction_jobs
+            GROUP BY status
+            ORDER BY status ASC
+            """,
+            (),
+        )
+        latest_jobs = await self._fetchall(
+            """
+            SELECT
+                j.id,
+                j.block_id,
+                j.status,
+                j.attempt_count,
+                j.scheduled_at,
+                j.started_at,
+                j.finished_at,
+                j.updated_at,
+                j.last_error,
+                j.workflow_state_json,
+                j.result_summary_json,
+                b.block_key,
+                b.platform_id,
+                b.group_id,
+                b.group_name,
+                b.message_count,
+                b.approx_text_chars,
+                b.first_event_at,
+                b.last_event_at
+            FROM profile_extraction_jobs j
+            JOIN profile_message_blocks b ON b.id = j.block_id
+            ORDER BY j.updated_at DESC, j.id DESC
+            LIMIT 12
+            """,
+            (),
+        )
+        latest_claims = await self._fetchall(
+            """
+            SELECT
+                id,
+                platform_id,
+                group_id,
+                group_name,
+                subject_user_id,
+                attribute_type,
+                COALESCE(
+                    NULLIF(json_extract(payload_json, '$.attribute_label'), ''),
+                    NULLIF(json_extract(payload_json, '$.label'), ''),
+                    attribute_type
+                ) AS attribute_label,
+                normalized_value,
+                source_kind,
+                confidence,
+                status,
+                updated_at
+            FROM profile_claims
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 12
+            """,
+            (),
+        )
+        cursors = await self._fetchall(
+            """
+            SELECT state_key, state_value, updated_at
+            FROM profile_pipeline_state
+            WHERE state_key LIKE 'profile_pipeline_cursor:%'
+            ORDER BY updated_at DESC
+            LIMIT 20
+            """,
+            (),
+        )
+        last_message = await self._fetchone(
+            """
+            SELECT id, platform_id, group_id, event_time
+            FROM archived_messages
+            WHERE direction = 'incoming'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (),
+        )
+
+        return {
+            "archived_incoming_messages": archived_incoming_messages,
+            "archived_groups": archived_groups,
+            "total_blocks": total_blocks,
+            "total_jobs": total_jobs,
+            "total_claims": total_claims,
+            "total_attributes": total_attributes,
+            "block_statuses": [dict(row) for row in block_status_rows],
+            "job_statuses": [dict(row) for row in job_status_rows],
+            "latest_jobs": [
+                {
+                    **dict(row),
+                    "workflow_state": self._from_json(row["workflow_state_json"]),
+                    "result_summary": self._from_json(row["result_summary_json"]),
+                }
+                for row in latest_jobs
+            ],
+            "latest_claims": [dict(row) for row in latest_claims],
+            "cursors": [dict(row) for row in cursors],
+            "last_message": dict(last_message) if last_message is not None else None,
+        }
+
+    async def reset_profile_pipeline(self, *, clear_claims: bool = True) -> dict[str, int]:
+        await self.initialize()
+        assert self._conn is not None
+
+        counts: dict[str, int] = {}
+        for table in (
+            "profile_message_blocks",
+            "profile_extraction_jobs",
+            "profile_claims",
+            "profile_attributes",
+            "profile_attribute_history",
+        ):
+            counts[table] = int(
+                await self._fetch_value(f"SELECT COUNT(*) FROM {table}", ()) or 0
+            )
+
+        await self._conn.execute(
+            """
+            DELETE FROM profile_pipeline_state
+            WHERE state_key LIKE 'profile_pipeline_cursor:%'
+            """
+        )
+        await self._conn.execute("DELETE FROM profile_extraction_jobs")
+        await self._conn.execute("DELETE FROM profile_message_blocks")
+        if clear_claims:
+            await self._conn.execute("DELETE FROM profile_claim_evidence")
+            await self._conn.execute("DELETE FROM profile_attribute_history")
+            await self._conn.execute("DELETE FROM profile_attributes")
+            await self._conn.execute("DELETE FROM profile_claims")
+        await self._conn.commit()
+        return counts
 
     async def list_groups(
         self,
@@ -1085,11 +1296,52 @@ class ArchiveDatabase:
             """,
             (platform_id, group_id),
         )
+        attribute_rows = await self._fetchall(
+            """
+            SELECT
+                attribute_type,
+                MAX(COALESCE(
+                    NULLIF(json_extract(payload_json, '$.attribute_label'), ''),
+                    attribute_type
+                )) AS attribute_label,
+                COUNT(*) AS user_count,
+                ROUND(AVG(confidence), 4) AS avg_confidence,
+                MAX(updated_at) AS last_updated_at
+            FROM profile_attributes
+            WHERE platform_id = ? AND group_id = ?
+            GROUP BY attribute_type
+            ORDER BY user_count DESC, last_updated_at DESC, attribute_type ASC
+            LIMIT 20
+            """,
+            (platform_id, group_id),
+        )
+        claim_status_rows = await self._fetchall(
+            """
+            SELECT
+                attribute_type,
+                MAX(COALESCE(
+                    NULLIF(json_extract(payload_json, '$.attribute_label'), ''),
+                    NULLIF(json_extract(payload_json, '$.label'), ''),
+                    attribute_type
+                )) AS attribute_label,
+                status,
+                COUNT(*) AS claim_count,
+                MAX(updated_at) AS last_updated_at
+            FROM profile_claims
+            WHERE platform_id = ? AND group_id = ?
+            GROUP BY attribute_type, status
+            ORDER BY claim_count DESC, last_updated_at DESC, attribute_type ASC, status ASC
+            LIMIT 30
+            """,
+            (platform_id, group_id),
+        )
 
         return {
             "summary": dict(summary) if summary is not None else {},
             "daily_stats": [dict(row) for row in reversed(daily_rows)],
             "top_interactions": [dict(row) for row in interaction_rows],
+            "top_attributes": [dict(row) for row in attribute_rows],
+            "claim_statuses": [dict(row) for row in claim_status_rows],
         }
 
     async def get_user_group_profile(
@@ -1192,6 +1444,116 @@ class ArchiveDatabase:
             """,
             (platform_id, group_id, user_id),
         )
+        attribute_rows = await self._fetchall(
+            """
+            SELECT
+                a.*,
+                COALESCE(
+                    NULLIF(json_extract(a.payload_json, '$.attribute_label'), ''),
+                    NULLIF(json_extract(c.payload_json, '$.attribute_label'), ''),
+                    NULLIF(json_extract(c.payload_json, '$.label'), ''),
+                    a.attribute_type
+                ) AS attribute_label,
+                c.raw_value AS claim_raw_value,
+                c.normalized_value AS claim_normalized_value,
+                c.source_kind AS claim_source_kind,
+                c.tense AS claim_tense,
+                c.polarity AS claim_polarity,
+                c.confidence AS claim_confidence,
+                c.status AS claim_status,
+                c.resolver_note AS claim_resolver_note,
+                c.first_seen_at AS claim_first_seen_at,
+                c.last_seen_at AS claim_last_seen_at,
+                c.updated_at AS claim_updated_at,
+                c.payload_json AS claim_payload_json
+            FROM profile_attributes a
+            LEFT JOIN profile_claims c
+                ON c.id = a.current_claim_id
+            WHERE a.platform_id = ? AND a.group_id = ? AND a.subject_user_id = ?
+            ORDER BY a.updated_at DESC, a.attribute_type ASC
+            """,
+            (platform_id, group_id, user_id),
+        )
+        claim_rows = await self._fetchall(
+            """
+            SELECT
+                c.*,
+                COALESCE(
+                    NULLIF(json_extract(c.payload_json, '$.attribute_label'), ''),
+                    NULLIF(json_extract(c.payload_json, '$.label'), ''),
+                    c.attribute_type
+                ) AS attribute_label,
+                COUNT(e.id) AS evidence_count
+            FROM profile_claims c
+            LEFT JOIN profile_claim_evidence e
+                ON e.claim_id = c.id
+            WHERE c.platform_id = ? AND c.group_id = ? AND c.subject_user_id = ?
+            GROUP BY c.id
+            ORDER BY c.updated_at DESC, c.id DESC
+            LIMIT 40
+            """,
+            (platform_id, group_id, user_id),
+        )
+        claim_ids = [int(row["id"]) for row in claim_rows]
+        evidence_by_claim: dict[int, list[dict[str, object]]] = defaultdict(list)
+        if claim_ids:
+            placeholders = ", ".join("?" for _ in claim_ids)
+            evidence_rows = await self._fetchall(
+                f"""
+                SELECT
+                    e.claim_id,
+                    e.message_row_id,
+                    e.excerpt,
+                    e.evidence_kind,
+                    e.created_at,
+                    m.event_time,
+                    m.sender_id,
+                    m.sender_name,
+                    m.sender_card,
+                    m.direction,
+                    m.plain_text,
+                    m.outline
+                FROM profile_claim_evidence e
+                JOIN archived_messages m
+                    ON m.id = e.message_row_id
+                WHERE e.claim_id IN ({placeholders})
+                ORDER BY m.event_time DESC, e.id DESC
+                """,
+                tuple(claim_ids),
+            )
+            for row in evidence_rows:
+                payload = dict(row)
+                payload["sender_label"] = (
+                    str(payload.get("sender_card") or "").strip()
+                    or str(payload.get("sender_name") or "").strip()
+                    or str(payload.get("sender_id") or "").strip()
+                )
+                evidence_by_claim[int(row["claim_id"])].append(payload)
+
+        history_rows = await self._fetchall(
+            """
+            SELECT
+                h.*,
+                COALESCE(
+                    NULLIF(json_extract(c.payload_json, '$.attribute_label'), ''),
+                    NULLIF(json_extract(c.payload_json, '$.label'), ''),
+                    h.attribute_type
+                ) AS attribute_label,
+                c.normalized_value AS claim_normalized_value,
+                c.status AS claim_status,
+                p.normalized_value AS previous_claim_normalized_value,
+                p.status AS previous_claim_status
+            FROM profile_attribute_history h
+            LEFT JOIN profile_claims c
+                ON c.id = h.claim_id
+            LEFT JOIN profile_claims p
+                ON p.id = h.previous_claim_id
+            WHERE h.platform_id = ? AND h.group_id = ? AND h.subject_user_id = ?
+            ORDER BY h.created_at DESC, h.id DESC
+            LIMIT 40
+            """,
+            (platform_id, group_id, user_id),
+        )
 
         return {
             "summary": dict(summary),
@@ -1199,6 +1561,22 @@ class ArchiveDatabase:
             "daily_stats": [dict(row) for row in reversed(daily_rows)],
             "outgoing_interactions": [dict(row) for row in outgoing_rows],
             "incoming_interactions": [dict(row) for row in incoming_rows],
+            "attributes": [
+                self._attribute_row_to_dict(row)
+                for row in attribute_rows
+            ],
+            "claims": [
+                {
+                    **self._claim_row_to_dict(row),
+                    "evidence_count": int(row["evidence_count"] or 0),
+                    "evidence": evidence_by_claim.get(int(row["id"]), []),
+                }
+                for row in claim_rows
+            ],
+            "attribute_history": [
+                self._attribute_history_row_to_dict(row)
+                for row in history_rows
+            ],
         }
 
     async def create_profile_message_blocks(
@@ -1337,7 +1715,7 @@ class ArchiveDatabase:
                     created += 1
                 else:
                     block_id = int(existing["id"])
-                    await self._conn.execute(
+                    cursor = await self._conn.execute(
                         """
                         INSERT OR IGNORE INTO profile_extraction_jobs (
                             block_id,
@@ -1349,6 +1727,7 @@ class ArchiveDatabase:
                         """,
                         (block_id, now, now),
                     )
+                    created += max(int(cursor.rowcount or 0), 0)
 
                 cursor_index = min(advance, len(rows)) - 1
                 cursor_id = int(rows[cursor_index]["id"])
@@ -1412,6 +1791,109 @@ class ArchiveDatabase:
         payload["result_summary"] = self._from_json(payload.pop("result_summary_json", None)) or {}
         return payload
 
+    async def update_profile_job_progress(
+        self,
+        *,
+        job_id: int,
+        stage: str,
+        stage_detail: str = "",
+        workflow_state: dict[str, object] | None = None,
+    ):
+        await self.initialize()
+        assert self._conn is not None
+
+        now = int(time.time())
+        progress_payload = dict(workflow_state or {})
+        progress_payload["current_stage"] = str(stage or "").strip()
+        progress_payload["stage_detail"] = str(stage_detail or "").strip()
+        progress_payload["progress_updated_at"] = now
+        await self._conn.execute(
+            """
+            UPDATE profile_extraction_jobs
+            SET updated_at = ?,
+                workflow_state_json = ?
+            WHERE id = ?
+            """,
+            (now, self._to_json(progress_payload), int(job_id)),
+        )
+        await self._conn.execute(
+            """
+            UPDATE profile_message_blocks
+            SET updated_at = ?
+            WHERE id = (
+                SELECT block_id
+                FROM profile_extraction_jobs
+                WHERE id = ?
+            )
+            """,
+            (now, int(job_id)),
+        )
+        await self._conn.commit()
+
+    async def recover_stale_profile_jobs(
+        self,
+        *,
+        timeout_sec: int,
+        force: bool = False,
+    ) -> int:
+        await self.initialize()
+        assert self._conn is not None
+
+        now = int(time.time())
+        cutoff = now - max(int(timeout_sec or 0), 1)
+        if force:
+            rows = await self._fetchall(
+                """
+                SELECT id, block_id
+                FROM profile_extraction_jobs
+                WHERE status = 'running'
+                """,
+                (),
+            )
+            reason = "recovered running profile job after plugin startup"
+        else:
+            rows = await self._fetchall(
+                """
+                SELECT id, block_id
+                FROM profile_extraction_jobs
+                WHERE status = 'running'
+                  AND COALESCE(started_at, updated_at, 0) <= ?
+                """,
+                (cutoff,),
+            )
+            reason = f"recovered stale running profile job after {timeout_sec}s"
+
+        if not rows:
+            return 0
+
+        job_ids = [int(row["id"]) for row in rows]
+        block_ids = [int(row["block_id"]) for row in rows]
+        job_placeholders = ", ".join("?" for _ in job_ids)
+        block_placeholders = ", ".join("?" for _ in block_ids)
+
+        await self._conn.execute(
+            f"""
+            UPDATE profile_extraction_jobs
+            SET status = 'failed',
+                finished_at = ?,
+                updated_at = ?,
+                last_error = ?
+            WHERE id IN ({job_placeholders})
+            """,
+            tuple([now, now, reason, *job_ids]),
+        )
+        await self._conn.execute(
+            f"""
+            UPDATE profile_message_blocks
+            SET status = 'failed',
+                updated_at = ?
+            WHERE id IN ({block_placeholders})
+            """,
+            tuple([now, *block_ids]),
+        )
+        await self._conn.commit()
+        return len(job_ids)
+
     async def get_profile_job_context(self, job_id: int) -> dict[str, object] | None:
         await self.initialize()
         assert self._conn is not None
@@ -1469,11 +1951,11 @@ class ArchiveDatabase:
 
         users = [str(value).strip() for value in subject_user_ids if str(value).strip()]
         attrs = [str(value).strip() for value in attribute_types if str(value).strip()]
-        if not users or not attrs:
+        if not users:
             return {"attributes": [], "recent_claims": []}
 
         user_placeholders = ", ".join("?" for _ in users)
-        attr_placeholders = ", ".join("?" for _ in attrs)
+        context_limit = max(limit_per_attribute * len(users) * max(len(attrs), 4), 24)
 
         attribute_rows = await self._fetchall(
             f"""
@@ -1482,9 +1964,10 @@ class ArchiveDatabase:
             WHERE platform_id = ?
               AND group_id = ?
               AND subject_user_id IN ({user_placeholders})
-              AND attribute_type IN ({attr_placeholders})
+            ORDER BY updated_at DESC, attribute_type ASC
+            LIMIT ?
             """,
-            tuple([platform_id, group_id, *users, *attrs]),
+            tuple([platform_id, group_id, *users, context_limit]),
         )
         claim_rows = await self._fetchall(
             f"""
@@ -1493,16 +1976,16 @@ class ArchiveDatabase:
             WHERE platform_id = ?
               AND group_id = ?
               AND subject_user_id IN ({user_placeholders})
-              AND attribute_type IN ({attr_placeholders})
             ORDER BY updated_at DESC, id DESC
             LIMIT ?
             """,
-            tuple(
-                [platform_id, group_id, *users, *attrs, max(limit_per_attribute * len(users) * len(attrs), 16)]
-            ),
+            tuple([platform_id, group_id, *users, context_limit]),
         )
         return {
-            "attributes": [dict(row) for row in attribute_rows],
+            "attributes": [
+                self._attribute_context_row_to_dict(row)
+                for row in attribute_rows
+            ],
             "recent_claims": [self._claim_row_to_dict(row) for row in claim_rows],
         }
 
@@ -1511,6 +1994,7 @@ class ArchiveDatabase:
         *,
         job_id: int,
         resolved_claims: list[dict[str, object]],
+        resolution_actions: list[dict[str, object]] | None = None,
         summary: dict[str, object] | None = None,
         workflow_state: dict[str, object] | None = None,
         block_messages: list[dict[str, object]] | None = None,
@@ -1535,6 +2019,7 @@ class ArchiveDatabase:
 
         inserted_claims = 0
         updated_attributes = 0
+        action_result = {"actions_applied": 0, "claims_rewritten": 0, "attributes_rewritten": 0}
 
         for payload in resolved_claims:
             subject_user_id = str(payload.get("subject_user_id") or "").strip()
@@ -1557,6 +2042,10 @@ class ArchiveDatabase:
             last_seen_at = max(evidence_times or [now])
             status = str(payload.get("status") or "candidate")
             current_value = bool(payload.get("current_value", False))
+            attribute_label = self._attribute_label_from_payload(payload)
+            payload_json = dict(payload.get("payload") or {})
+            if attribute_label:
+                payload_json["attribute_label"] = attribute_label
 
             cursor = await self._conn.execute(
                 """
@@ -1601,7 +2090,7 @@ class ArchiveDatabase:
                     last_seen_at,
                     now,
                     now,
-                    self._to_json(payload.get("payload")),
+                    self._to_json(payload_json),
                 ),
             )
             claim_id = int(cursor.lastrowid)
@@ -1676,8 +2165,9 @@ class ArchiveDatabase:
                     last_seen_at,
                     evidence_count,
                     updated_at,
-                    status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform_id, group_id, subject_user_id, attribute_type)
                 DO UPDATE SET
                     group_name = excluded.group_name,
@@ -1690,7 +2180,8 @@ class ArchiveDatabase:
                     last_seen_at = MAX(profile_attributes.last_seen_at, excluded.last_seen_at),
                     evidence_count = excluded.evidence_count,
                     updated_at = excluded.updated_at,
-                    status = excluded.status
+                    status = excluded.status,
+                    payload_json = excluded.payload_json
                 """,
                 (
                     platform_id,
@@ -1708,6 +2199,7 @@ class ArchiveDatabase:
                     len(evidence_ids),
                     now,
                     status,
+                    self._to_json({"attribute_label": attribute_label} if attribute_label else {}),
                 ),
             )
             await self._conn.execute(
@@ -1743,6 +2235,14 @@ class ArchiveDatabase:
             )
             updated_attributes += 1
 
+        action_result = await self._apply_profile_resolution_actions(
+            platform_id=platform_id,
+            group_id=group_id,
+            group_name=group_name,
+            actions=list(resolution_actions or []),
+            now=now,
+        )
+
         await self._conn.execute(
             """
             UPDATE profile_extraction_jobs
@@ -1761,6 +2261,7 @@ class ArchiveDatabase:
                         **dict(summary or {}),
                         "inserted_claims": inserted_claims,
                         "updated_attributes": updated_attributes,
+                        **action_result,
                     }
                 ),
                 self._to_json(workflow_state),
@@ -1784,7 +2285,423 @@ class ArchiveDatabase:
         return {
             "inserted_claims": inserted_claims,
             "updated_attributes": updated_attributes,
+            **action_result,
         }
+
+    async def _apply_profile_resolution_actions(
+        self,
+        *,
+        platform_id: str,
+        group_id: str,
+        group_name: str,
+        actions: list[dict[str, object]],
+        now: int,
+    ) -> dict[str, int]:
+        result = {
+            "actions_applied": 0,
+            "claims_rewritten": 0,
+            "attributes_rewritten": 0,
+        }
+        for action in actions:
+            action_type = str(
+                action.get("type")
+                or action.get("action_type")
+                or ""
+            ).strip()
+            if not action_type:
+                continue
+
+            if action_type in {"set_claim_status", "mark_claim_status", "update_claim_status"}:
+                affected = await self._apply_claim_status_action(
+                    platform_id=platform_id,
+                    group_id=group_id,
+                    group_name=group_name,
+                    action=action,
+                    now=now,
+                )
+                if affected:
+                    result["actions_applied"] += 1
+                    result["claims_rewritten"] += affected
+                continue
+
+            if action_type in {"rename_attribute", "canonicalize_attribute", "merge_attribute"}:
+                affected = await self._apply_attribute_rewrite_action(
+                    platform_id=platform_id,
+                    group_id=group_id,
+                    group_name=group_name,
+                    action=action,
+                    now=now,
+                )
+                if affected["attributes"] or affected["claims"]:
+                    result["actions_applied"] += 1
+                    result["claims_rewritten"] += affected["claims"]
+                    result["attributes_rewritten"] += affected["attributes"]
+                if action.get("claim_ids") and str(action.get("status") or "").strip():
+                    status_affected = await self._apply_claim_status_action(
+                        platform_id=platform_id,
+                        group_id=group_id,
+                        group_name=group_name,
+                        action=action,
+                        now=now,
+                    )
+                    result["claims_rewritten"] += status_affected
+        return result
+
+    async def _apply_claim_status_action(
+        self,
+        *,
+        platform_id: str,
+        group_id: str,
+        group_name: str,
+        action: dict[str, object],
+        now: int,
+    ) -> int:
+        raw_claim_ids = action.get("claim_ids", []) or []
+        if isinstance(raw_claim_ids, (str, int)):
+            raw_claim_ids = [raw_claim_ids]
+        claim_ids = [
+            int(value)
+            for value in raw_claim_ids
+            if str(value).strip()
+        ]
+        status = str(action.get("status") or "").strip()
+        if not claim_ids or not status:
+            return 0
+
+        placeholders = ", ".join("?" for _ in claim_ids)
+        rows = await self._fetchall(
+            f"""
+            SELECT id, subject_user_id, attribute_type, resolver_note, payload_json
+            FROM profile_claims
+            WHERE platform_id = ?
+              AND group_id = ?
+              AND id IN ({placeholders})
+            """,
+            tuple([platform_id, group_id, *claim_ids]),
+        )
+        if not rows:
+            return 0
+
+        reason = str(action.get("reason") or "").strip()
+        for row in rows:
+            payload = self._json_dict(row["payload_json"])
+            payload["last_resolution_action"] = {
+                "type": str(action.get("type") or action.get("action_type") or ""),
+                "status": status,
+                "reason": reason,
+                "updated_at": now,
+            }
+            resolver_note = reason or str(row["resolver_note"] or "")
+            await self._conn.execute(
+                """
+                UPDATE profile_claims
+                SET status = ?,
+                    resolver_note = ?,
+                    updated_at = ?,
+                    payload_json = ?
+                WHERE id = ?
+                """,
+                (status, resolver_note, now, self._to_json(payload), int(row["id"])),
+            )
+            await self._conn.execute(
+                """
+                INSERT INTO profile_attribute_history (
+                    platform_id,
+                    group_id,
+                    subject_user_id,
+                    attribute_type,
+                    claim_id,
+                    previous_claim_id,
+                    action,
+                    created_at,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    platform_id,
+                    group_id,
+                    str(row["subject_user_id"] or ""),
+                    str(row["attribute_type"] or ""),
+                    int(row["id"]),
+                    None,
+                    f"set_claim_status:{status}",
+                    now,
+                    self._to_json(
+                        {
+                            "status": status,
+                            "reason": reason,
+                            "group_name": group_name,
+                        }
+                    ),
+                ),
+            )
+
+        await self._conn.execute(
+            f"""
+            UPDATE profile_attributes
+            SET status = ?,
+                updated_at = ?
+            WHERE platform_id = ?
+              AND group_id = ?
+              AND current_claim_id IN ({placeholders})
+            """,
+            tuple([status, now, platform_id, group_id, *claim_ids]),
+        )
+        return len(rows)
+
+    async def _apply_attribute_rewrite_action(
+        self,
+        *,
+        platform_id: str,
+        group_id: str,
+        group_name: str,
+        action: dict[str, object],
+        now: int,
+    ) -> dict[str, int]:
+        subject_user_id = str(action.get("subject_user_id") or "").strip()
+        from_attribute_type = str(
+            action.get("from_attribute_type")
+            or action.get("source_attribute_type")
+            or action.get("attribute_type")
+            or ""
+        ).strip()
+        to_attribute_type = str(
+            action.get("to_attribute_type")
+            or action.get("target_attribute_type")
+            or ""
+        ).strip()
+        if not subject_user_id or not from_attribute_type or not to_attribute_type:
+            return {"claims": 0, "attributes": 0}
+        if from_attribute_type == to_attribute_type:
+            return {"claims": 0, "attributes": 0}
+
+        action_type = str(action.get("type") or action.get("action_type") or "").strip()
+        attribute_label = str(action.get("attribute_label") or "").strip()
+        reason = str(action.get("reason") or "").strip()
+
+        claim_rows = await self._fetchall(
+            """
+            SELECT id, payload_json
+            FROM profile_claims
+            WHERE platform_id = ?
+              AND group_id = ?
+              AND subject_user_id = ?
+              AND attribute_type = ?
+            """,
+            (platform_id, group_id, subject_user_id, from_attribute_type),
+        )
+        for row in claim_rows:
+            payload = self._json_dict(row["payload_json"])
+            if attribute_label:
+                payload["attribute_label"] = attribute_label
+            payload["last_resolution_action"] = {
+                "type": action_type,
+                "from_attribute_type": from_attribute_type,
+                "to_attribute_type": to_attribute_type,
+                "reason": reason,
+                "updated_at": now,
+            }
+            await self._conn.execute(
+                """
+                UPDATE profile_claims
+                SET attribute_type = ?,
+                    updated_at = ?,
+                    payload_json = ?
+                WHERE id = ?
+                """,
+                (to_attribute_type, now, self._to_json(payload), int(row["id"])),
+            )
+
+        source = await self._fetchone(
+            """
+            SELECT *
+            FROM profile_attributes
+            WHERE platform_id = ?
+              AND group_id = ?
+              AND subject_user_id = ?
+              AND attribute_type = ?
+            """,
+            (platform_id, group_id, subject_user_id, from_attribute_type),
+        )
+        target = await self._fetchone(
+            """
+            SELECT *
+            FROM profile_attributes
+            WHERE platform_id = ?
+              AND group_id = ?
+              AND subject_user_id = ?
+              AND attribute_type = ?
+            """,
+            (platform_id, group_id, subject_user_id, to_attribute_type),
+        )
+
+        attributes_rewritten = 0
+        claim_id_for_history: int | None = None
+        previous_claim_id: int | None = None
+        if source is None and not claim_rows:
+            return {"claims": 0, "attributes": 0}
+        if source is not None:
+            source_payload = self._json_dict(source["payload_json"])
+            if attribute_label:
+                source_payload["attribute_label"] = attribute_label
+            source_payload["last_resolution_action"] = {
+                "type": action_type,
+                "from_attribute_type": from_attribute_type,
+                "to_attribute_type": to_attribute_type,
+                "reason": reason,
+                "updated_at": now,
+            }
+            claim_id_for_history = (
+                int(source["current_claim_id"])
+                if source["current_claim_id"] is not None
+                else None
+            )
+            if target is None:
+                await self._conn.execute(
+                    """
+                    UPDATE profile_attributes
+                    SET attribute_type = ?,
+                        updated_at = ?,
+                        payload_json = ?
+                    WHERE platform_id = ?
+                      AND group_id = ?
+                      AND subject_user_id = ?
+                      AND attribute_type = ?
+                    """,
+                    (
+                        to_attribute_type,
+                        now,
+                        self._to_json(source_payload),
+                        platform_id,
+                        group_id,
+                        subject_user_id,
+                        from_attribute_type,
+                    ),
+                )
+            else:
+                previous_claim_id = (
+                    int(target["current_claim_id"])
+                    if target["current_claim_id"] is not None
+                    else None
+                )
+                use_source = int(source["updated_at"] or 0) >= int(target["updated_at"] or 0)
+                if use_source:
+                    await self._conn.execute(
+                        """
+                        UPDATE profile_attributes
+                        SET group_name = ?,
+                            current_claim_id = ?,
+                            current_value = ?,
+                            normalized_value = ?,
+                            confidence = ?,
+                            source_kind = ?,
+                            first_seen_at = MIN(first_seen_at, ?),
+                            last_seen_at = MAX(last_seen_at, ?),
+                            evidence_count = ?,
+                            updated_at = ?,
+                            status = ?,
+                            payload_json = ?
+                        WHERE platform_id = ?
+                          AND group_id = ?
+                          AND subject_user_id = ?
+                          AND attribute_type = ?
+                        """,
+                        (
+                            str(source["group_name"] or group_name or ""),
+                            source["current_claim_id"],
+                            str(source["current_value"] or ""),
+                            str(source["normalized_value"] or ""),
+                            float(source["confidence"] or 0.0),
+                            str(source["source_kind"] or "unknown"),
+                            int(source["first_seen_at"] or now),
+                            int(source["last_seen_at"] or now),
+                            int(source["evidence_count"] or 0),
+                            now,
+                            str(source["status"] or "candidate"),
+                            self._to_json(source_payload),
+                            platform_id,
+                            group_id,
+                            subject_user_id,
+                            to_attribute_type,
+                        ),
+                    )
+                else:
+                    target_payload = self._json_dict(target["payload_json"])
+                    if attribute_label:
+                        target_payload["attribute_label"] = attribute_label
+                    target_payload["last_resolution_action"] = {
+                        "type": action_type,
+                        "from_attribute_type": from_attribute_type,
+                        "to_attribute_type": to_attribute_type,
+                        "reason": reason,
+                        "updated_at": now,
+                    }
+                    await self._conn.execute(
+                        """
+                        UPDATE profile_attributes
+                        SET updated_at = ?,
+                            payload_json = ?
+                        WHERE platform_id = ?
+                          AND group_id = ?
+                          AND subject_user_id = ?
+                          AND attribute_type = ?
+                        """,
+                        (
+                            now,
+                            self._to_json(target_payload),
+                            platform_id,
+                            group_id,
+                            subject_user_id,
+                            to_attribute_type,
+                        ),
+                    )
+                await self._conn.execute(
+                    """
+                    DELETE FROM profile_attributes
+                    WHERE platform_id = ?
+                      AND group_id = ?
+                      AND subject_user_id = ?
+                      AND attribute_type = ?
+                    """,
+                    (platform_id, group_id, subject_user_id, from_attribute_type),
+                )
+            attributes_rewritten = 1
+
+        await self._conn.execute(
+            """
+            INSERT INTO profile_attribute_history (
+                platform_id,
+                group_id,
+                subject_user_id,
+                attribute_type,
+                claim_id,
+                previous_claim_id,
+                action,
+                created_at,
+                payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                platform_id,
+                group_id,
+                subject_user_id,
+                to_attribute_type,
+                claim_id_for_history,
+                previous_claim_id,
+                action_type,
+                now,
+                self._to_json(
+                    {
+                        "from_attribute_type": from_attribute_type,
+                        "to_attribute_type": to_attribute_type,
+                        "attribute_label": attribute_label,
+                        "reason": reason,
+                        "rewritten_claim_count": len(claim_rows),
+                    }
+                ),
+            ),
+        )
+        return {"claims": len(claim_rows), "attributes": attributes_rewritten}
 
     async def complete_profile_job(
         self,
@@ -1842,6 +2759,28 @@ class ArchiveDatabase:
         assert self._conn is not None
 
         now = int(time.time())
+        existing = await self._fetchone(
+            """
+            SELECT workflow_state_json
+            FROM profile_extraction_jobs
+            WHERE id = ?
+            """,
+            (int(job_id),),
+        )
+        existing_state = (
+            self._from_json(existing["workflow_state_json"])
+            if existing is not None
+            else None
+        )
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+        merged_state = {
+            **existing_state,
+            **dict(workflow_state or {}),
+            "current_stage": "failed",
+            "stage_detail": error_text[:300],
+            "progress_updated_at": now,
+        }
         await self._conn.execute(
             """
             UPDATE profile_extraction_jobs
@@ -1852,7 +2791,7 @@ class ArchiveDatabase:
                 workflow_state_json = ?
             WHERE id = ?
             """,
-            (now, now, error_text[:1000], self._to_json(workflow_state), int(job_id)),
+            (now, now, error_text[:1000], self._to_json(merged_state), int(job_id)),
         )
         await self._conn.execute(
             """
@@ -2200,6 +3139,7 @@ class ArchiveDatabase:
                 evidence_count INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'candidate',
+                payload_json TEXT NOT NULL DEFAULT '{}',
                 PRIMARY KEY (platform_id, group_id, subject_user_id, attribute_type),
                 FOREIGN KEY(current_claim_id) REFERENCES profile_claims(id) ON DELETE SET NULL
             );
@@ -2225,6 +3165,11 @@ class ArchiveDatabase:
             CREATE INDEX IF NOT EXISTS idx_profile_attribute_history_subject
             ON profile_attribute_history (platform_id, group_id, subject_user_id, attribute_type, created_at DESC);
             """
+        )
+        await self._ensure_column(
+            "profile_attributes",
+            "payload_json",
+            "TEXT NOT NULL DEFAULT '{}'",
         )
 
     @staticmethod
@@ -2454,6 +3399,16 @@ class ArchiveDatabase:
         async with self._conn.execute(sql, params) as cursor:
             return await cursor.fetchone()
 
+    async def _ensure_column(self, table: str, column: str, definition: str):
+        assert self._conn is not None
+        async with self._conn.execute(f"PRAGMA table_info({table})") as cursor:
+            rows = await cursor.fetchall()
+        if any(str(row["name"]) == column for row in rows):
+            return
+        await self._conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        )
+
     @staticmethod
     def _to_json(value) -> str:
         return json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
@@ -2468,6 +3423,12 @@ class ArchiveDatabase:
         except json.JSONDecodeError:
             return text
 
+    def _json_dict(self, value) -> dict[str, object]:
+        payload = self._from_json(value)
+        if isinstance(payload, dict):
+            return dict(payload)
+        return {}
+
     def _segment_row_to_dict(self, row) -> dict[str, object]:
         payload = dict(row)
         payload["seg_data"] = self._from_json(payload.pop("seg_data_json", None))
@@ -2480,5 +3441,86 @@ class ArchiveDatabase:
 
     def _claim_row_to_dict(self, row) -> dict[str, object]:
         payload = dict(row)
+        payload.setdefault("attribute_label", "")
         payload["payload"] = self._from_json(payload.pop("payload_json", None))
+        if not payload["attribute_label"] and isinstance(payload["payload"], dict):
+            payload["attribute_label"] = str(
+                payload["payload"].get("attribute_label")
+                or payload["payload"].get("label")
+                or ""
+            )
         return payload
+
+    def _attribute_row_to_dict(self, row) -> dict[str, object]:
+        payload = dict(row)
+        payload.setdefault("attribute_label", "")
+        claim_payload = self._from_json(payload.pop("claim_payload_json", None))
+        current_claim_id = payload.get("current_claim_id")
+        if current_claim_id is not None:
+            payload["current_claim"] = {
+                "id": int(current_claim_id),
+                "raw_value": payload.pop("claim_raw_value", ""),
+                "normalized_value": payload.pop("claim_normalized_value", ""),
+                "source_kind": payload.pop("claim_source_kind", ""),
+                "tense": payload.pop("claim_tense", ""),
+                "polarity": payload.pop("claim_polarity", ""),
+                "confidence": payload.pop("claim_confidence", 0.0),
+                "status": payload.pop("claim_status", ""),
+                "resolver_note": payload.pop("claim_resolver_note", ""),
+                "first_seen_at": payload.pop("claim_first_seen_at", 0),
+                "last_seen_at": payload.pop("claim_last_seen_at", 0),
+                "updated_at": payload.pop("claim_updated_at", 0),
+                "payload": claim_payload,
+            }
+        else:
+            payload["current_claim"] = None
+            payload.pop("claim_raw_value", None)
+            payload.pop("claim_normalized_value", None)
+            payload.pop("claim_source_kind", None)
+            payload.pop("claim_tense", None)
+            payload.pop("claim_polarity", None)
+            payload.pop("claim_confidence", None)
+            payload.pop("claim_status", None)
+            payload.pop("claim_resolver_note", None)
+            payload.pop("claim_first_seen_at", None)
+            payload.pop("claim_last_seen_at", None)
+            payload.pop("claim_updated_at", None)
+        return payload
+
+    def _attribute_context_row_to_dict(self, row) -> dict[str, object]:
+        payload = dict(row)
+        payload_json = self._from_json(payload.pop("payload_json", None))
+        payload["payload"] = payload_json if isinstance(payload_json, dict) else {}
+        payload["attribute_label"] = str(
+            payload["payload"].get("attribute_label")
+            or payload["payload"].get("label")
+            or payload.get("attribute_type")
+            or ""
+        )
+        return payload
+
+    def _attribute_history_row_to_dict(self, row) -> dict[str, object]:
+        payload = dict(row)
+        payload.setdefault("attribute_label", "")
+        payload["payload"] = self._from_json(payload.pop("payload_json", None))
+        if not payload["attribute_label"] and isinstance(payload["payload"], dict):
+            payload["attribute_label"] = str(
+                payload["payload"].get("attribute_label")
+                or payload["payload"].get("label")
+                or ""
+            )
+        return payload
+
+    @staticmethod
+    def _attribute_label_from_payload(payload: dict[str, object]) -> str:
+        label = str(payload.get("attribute_label") or "").strip()
+        if label:
+            return label
+        nested = payload.get("payload")
+        if isinstance(nested, dict):
+            return str(
+                nested.get("attribute_label")
+                or nested.get("label")
+                or ""
+            ).strip()
+        return ""
